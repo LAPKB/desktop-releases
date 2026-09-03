@@ -1,2 +1,19 @@
-# desktop-releases
-Public binaries and update catalogs for LAPKB desktop apps
+# LAPKB desktop releases
+
+This repository is the public home for LAPKB desktop release metadata and, once
+published, immutable signed update assets. It contains no application source.
+
+`channels/stable.json` and `channels/beta.json` are v1 routing catalogs for the
+currently published desktop applications. Their `manifestUrl` values stay
+`null` until a real, signed Tauri updater manifest is published. A non-null URL
+must point to the standard Tauri updater document; this catalog does not define
+a second artifact format and never carries updater public keys or trusted launch
+metadata.
+
+Publish in this order: immutable signed assets, the per-app Tauri manifest, then
+the suite catalog. Validate locally with:
+
+```sh
+npm ci
+npm test
+```

@@ -1,0 +1,28 @@
+{
+  "$schema": "../schemas/update-catalog-v1.schema.json",
+  "schemaVersion": 1,
+  "revision": 1,
+  "channel": "beta",
+  "apps": [
+    {
+      "id": "papir",
+      "displayName": "Papir",
+      "manifestUrl": null
+    },
+    {
+      "id": "bestdose",
+      "displayName": "BestDose",
+      "manifestUrl": null
+    },
+    {
+      "id": "bdautodial",
+      "displayName": "BDautodial",
+      "manifestUrl": null
+    },
+    {
+      "id": "checkerboard",
+      "displayName": "Checkerboard Bliss",
+      "manifestUrl": null
+    }
+  ]
+}

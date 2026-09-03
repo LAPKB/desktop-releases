@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/LAPKB/desktop-releases/main/schemas/launcher-catalog-v1.schema.json",
+  "title": "LAPKB trusted launcher catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "apps"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "apps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/app"
+      }
+    }
+  },
+  "$defs": {
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "description",
+        "iconPath",
+        "bundleIdentifier",
+        "executableAliases",
+        "applicationNames"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\r\\n]+[.!?]$"
+        },
+        "iconPath": {
+          "type": "string",
+          "pattern": "^app-icons/[a-z][a-z0-9-]*\\.png$"
+        },
+        "bundleIdentifier": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "executableAliases": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          }
+        },
+        "applicationNames": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "macos",
+            "linux",
+            "windows"
+          ],
+          "properties": {
+            "macos": {
+              "$ref": "#/$defs/applicationNamesForPlatform"
+            },
+            "linux": {
+              "$ref": "#/$defs/applicationNamesForPlatform"
+            },
+            "windows": {
+              "$ref": "#/$defs/applicationNamesForPlatform"
+            }
+          }
+        }
+      }
+    },
+    "applicationNamesForPlatform": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
