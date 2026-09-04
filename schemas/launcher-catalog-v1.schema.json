@@ -33,6 +33,7 @@
         "id",
         "displayName",
         "description",
+        "accessPolicy",
         "iconPath",
         "bundleIdentifier",
         "executableAliases",
@@ -42,6 +43,7 @@
         "id": {
           "type": "string",
           "minLength": 1,
+          "maxLength": 128,
           "pattern": "^[a-z][a-z0-9-]*$"
         },
         "displayName": {
@@ -53,6 +55,9 @@
           "minLength": 1,
           "maxLength": 160,
           "pattern": "^[^\\r\\n]+[.!?]$"
+        },
+        "accessPolicy": {
+          "$ref": "#/$defs/accessPolicy"
         },
         "iconPath": {
           "type": "string",
@@ -94,6 +99,35 @@
           }
         }
       }
+    },
+    "accessPolicy": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "const": "public"
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "role"],
+          "properties": {
+            "kind": {
+              "const": "protected"
+            },
+            "role": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9-]*$"
+            }
+          }
+        }
+      ]
     },
     "applicationNamesForPlatform": {
       "type": "array",
