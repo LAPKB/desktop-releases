@@ -1,0 +1,57 @@
+name: Publish smoke test
+
+# Manual check that the shared publish pipeline works from CI: builds a tiny
+# synthetic fixture, publishes it to the beta channel of a real app id, and
+# lets the reusable workflow verify the served bytes. Nothing here is a product
+# release; the fixture is removed after the check.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build the synthetic fixture
+        run: |
+          set -eu
+          name=lapkb-launcher-0.0.1-darwin-aarch64.app.zip
+          printf 'lapkb publish smoke fixture\n' > "$name"
+          python3 - "$name" <<'PY'
+          import json, sys
+          name = sys.argv[1]
+          document = {
+              'version': '0.0.1',
+              'platforms': {
+                  'darwin-aarch64': {
+                      'url': 'https://licenses-staging.lapkb.org/downloads/launcher/beta/' + name,
+                  },
+              },
+          }
+          with open('latest.json', 'w', encoding='utf-8') as output:
+              json.dump(document, output, indent=2, sort_keys=True)
+              output.write('\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: publish-smoke-fixture
+          path: |
+            lapkb-launcher-0.0.1-darwin-aarch64.app.zip
+            latest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: fixture
+    uses: ./.github/workflows/publish-download.yml
+    with:
+      app: launcher
+      channel: beta
+      version: 0.0.1
+      artifact-file: lapkb-launcher-0.0.1-darwin-aarch64.app.zip
+      manifest-file: latest.json
+      artifact-name: publish-smoke-fixture
+    secrets: inherit
