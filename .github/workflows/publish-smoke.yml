@@ -1,9 +1,9 @@
 name: Publish smoke test
 
-# Manual check that the shared publish pipeline works from CI: builds a tiny
-# synthetic fixture, publishes it to the beta channel of a real app id, and
-# lets the reusable workflow verify the served bytes. Nothing here is a product
-# release; the fixture is removed after the check.
+# Manual check that the shared pipeline works from CI: builds a tiny synthetic
+# fixture and stages it as a release. The download origin pulls staged releases
+# on its own schedule, so this also proves the unattended path. Nothing here is
+# a product release; the fixture is removed after the check.
 
 on:
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
 
   publish:
     needs: fixture
-    uses: ./.github/workflows/publish-download.yml
+    uses: ./.github/workflows/stage-release.yml
     with:
       app: launcher
       channel: beta
@@ -54,4 +54,3 @@ jobs:
       artifact-file: lapkb-launcher-0.0.1-darwin-aarch64.app.zip
       manifest-file: latest.json
       artifact-name: publish-smoke-fixture
-    secrets: inherit

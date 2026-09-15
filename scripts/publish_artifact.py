@@ -35,7 +35,7 @@ CONTENT_ADDRESSED = re.compile(
     r'^[a-z0-9-]+-(\d+\.\d+\.\d+)-darwin-aarch64-([0-9a-f]{64})\.app\.tar\.gz$')
 VERSIONED = re.compile(r'^[a-z0-9-]+-(\d+\.\d+\.\d+)-darwin-aarch64\.app\.zip$')
 
-REMOTE_SCRIPT = '/home/siel/bin/lapkb-publish-remote.py'
+REMOTE_SCRIPT = '/home/siel/bin/publish_remote.py'
 
 
 def required(name):
