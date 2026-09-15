@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 CONTENT_ADDRESSED = re.compile(
-    r'^[a-z0-9-]+-(\d+\.\d+\.\d+)-darwin-aarch64-([0-9a-f]{64})\.app\.tar\.gz$')
+    r'^[a-z0-9-]+-(\d+\.\d+\.\d+)-darwin-aarch64-([0-9a-f]{64})\.(app\.tar\.gz|app\.zip)$')
 VERSIONED = re.compile(r'^[a-z0-9-]+-(\d+\.\d+\.\d+)-darwin-aarch64\.app\.zip$')
 
 REMOTE_SCRIPT = '/home/siel/bin/publish_remote.py'
