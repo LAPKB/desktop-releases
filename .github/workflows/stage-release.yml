@@ -34,6 +34,10 @@ on:
         description: Uploaded workflow artifact holding both files
         required: true
         type: string
+    secrets:
+      APP_PRIVATE_KEY:
+        description: GitHub App private key used to stage the release; falls back to the caller's token
+        required: false
 
 permissions:
   contents: write
@@ -54,21 +58,30 @@ jobs:
           printf '%s\n' "${{ inputs.version }}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           test "${{ inputs.version }}" = "$(python3 -c 'import json,sys;print(json.load(open("staged/${{ inputs.manifest-file }}"))["version"])')"
           test -s "staged/${{ inputs.artifact-file }}"
+      - name: Mint a staging token
+        id: token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: LAPKB
+          repositories: desktop-releases
       - name: Stage the release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token || secrets.GITHUB_TOKEN }}
           TAG: publish-${{ inputs.app }}-${{ inputs.channel }}-${{ inputs.version }}
         run: |
           set -eu
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo LAPKB/desktop-releases >/dev/null 2>&1; then
             echo "release $TAG already exists; leaving it untouched"
             exit 0
           fi
           gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo LAPKB/desktop-releases \
             --title "$TAG" \
             --notes "Staged release for the download origin: ${{ inputs.app }} ${{ inputs.version }} (${{ inputs.channel }})." \
             "staged/${{ inputs.artifact-file }}" \
             "staged/${{ inputs.manifest-file }}"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets \
+          gh release view "$TAG" --repo LAPKB/desktop-releases --json tagName,assets \
             -q '"staged " + .tagName + " with " + ([.assets[].name] | join(", "))'
