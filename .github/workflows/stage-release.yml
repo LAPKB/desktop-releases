@@ -1,0 +1,74 @@
+name: Stage release for the download origin
+
+# Called by product repositories after they have built (and, where applicable,
+# signed) a release artifact. It only stages the files as a release in this
+# repository using the workflow's own token; the download origin pulls staged
+# releases itself, so no CI runner needs network access to the origin and no
+# host credential ever leaves it.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Product id, e.g. launcher, papir, bestdose, bdautodial
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        required: false
+        default: stable
+        type: string
+      version:
+        description: Semantic version being published
+        required: true
+        type: string
+      artifact-file:
+        description: Release artifact file name inside the downloaded artifact
+        required: true
+        type: string
+      manifest-file:
+        description: Signed release manifest file name inside the downloaded artifact
+        required: true
+        type: string
+      artifact-name:
+        description: Uploaded workflow artifact holding both files
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: staged
+      - name: Validate the staged files
+        run: |
+          set -eu
+          printf '%s\n' "${{ inputs.app }}" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'
+          printf '%s\n' "${{ inputs.version }}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          test "${{ inputs.version }}" = "$(python3 -c 'import json,sys;print(json.load(open("staged/${{ inputs.manifest-file }}"))["version"])')"
+          test -s "staged/${{ inputs.artifact-file }}"
+      - name: Stage the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: publish-${{ inputs.app }}-${{ inputs.channel }}-${{ inputs.version }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists; leaving it untouched"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "Staged release for the download origin: ${{ inputs.app }} ${{ inputs.version }} (${{ inputs.channel }})." \
+            "staged/${{ inputs.artifact-file }}" \
+            "staged/${{ inputs.manifest-file }}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets \
+            -q '"staged " + .tagName + " with " + ([.assets[].name] | join(", "))'
