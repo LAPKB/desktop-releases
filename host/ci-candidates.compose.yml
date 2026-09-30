@@ -1,0 +1,20 @@
+# Private candidate storage only; the existing edge supplies HTTPS.
+services:
+  lapkb-ci-candidates:
+    container_name: lapkb-ci-candidates
+    image: docker.io/library/python@sha256:34d4d54d6f68a1980ad02433a5078d998ab394d55c97d953efa50b442135baf2
+    user: "1000:1000"
+    command: [python3, -I, /home/siel/bin/lapkb-ci-candidates-http.py]
+    restart: unless-stopped
+    environment:
+      LAPKB_CI_CANDIDATES_BIND: "0.0.0.0:8791"
+      LAPKB_CI_CANDIDATES_TOKEN_FILE: /home/siel/.config/lapkb-ci-candidates/token
+    volumes:
+      - /home/siel/lapkb-ci-candidates:/home/siel/lapkb-ci-candidates:rw,Z
+      - /home/siel/bin/lapkb-ci-candidates.py:/home/siel/bin/lapkb-ci-candidates.py:ro,Z
+      - /home/siel/bin/lapkb-ci-candidates-http.py:/home/siel/bin/lapkb-ci-candidates-http.py:ro,Z
+      - /home/siel/.config/lapkb-ci-candidates/token:/home/siel/.config/lapkb-ci-candidates/token:ro,Z
+    networks: [lapkb-public-edge]
+networks:
+  lapkb-public-edge:
+    external: true
