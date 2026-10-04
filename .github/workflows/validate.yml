@@ -121,7 +121,7 @@ jobs:
             CARGO_NET_OFFLINE=true GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null
             GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/usr/bin/false
             CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$linker"
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C linker-flavor=gnu-lld -C link-self-contained=yes -C target-feature=+crt-static')
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C linker-flavor=ld.lld -C link-self-contained=yes -C target-feature=+crt-static')
           "${native_env[@]}" cargo build --release --locked --offline --jobs 2 \
             --bin lapkb-release-verifier --target "$PUBLISHER_RUST_TARGET" \
             --manifest-path "$JOB_DIRECTORY/source/host/verifier/Cargo.toml"
