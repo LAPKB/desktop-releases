@@ -3,6 +3,13 @@ name: Validate desktop release metadata
 on:
   push:
     branches: [launcher]
+  workflow_dispatch:
+    inputs:
+      runner_arch:
+        description: Native Linux verifier architecture
+        type: choice
+        options: [X64, ARM64]
+        default: X64
 
 permissions:
   contents: read
@@ -12,7 +19,7 @@ jobs:
     if: github.repository == 'LAPKB/desktop-releases' && github.ref == 'refs/heads/launcher'
     runs-on:
       group: Default
-      labels: [self-hosted, Linux, X64]
+      labels: [self-hosted, Linux, "${{ inputs.runner_arch || 'X64' }}"]
     timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
@@ -48,11 +55,18 @@ jobs:
         env:
           JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
           JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+          PUBLISHER_ARCH: ${{ inputs.runner_arch || 'X64' }}
         shell: bash
         run: |
           set -euo pipefail
+          test "$RUNNER_ARCH" = "$PUBLISHER_ARCH"
+          case "$PUBLISHER_ARCH" in
+            X64) platform=linux/amd64 ;;
+            ARM64) platform=linux/arm64 ;;
+            *) exit 1 ;;
+          esac
           python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
-          docker buildx build --file "$JOB_DIRECTORY/source/scripts/ci/publisher.Dockerfile" \
+          docker buildx build --platform "$platform" --file "$JOB_DIRECTORY/source/scripts/ci/publisher.Dockerfile" \
             --target ci-evidence --build-arg PUBLISHER_SOURCE_SHA="$GITHUB_SHA" \
             --build-arg PUBLISHER_RUN_ID="$GITHUB_RUN_ID" --build-arg PUBLISHER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             --output "type=local,dest=$JOB_DIRECTORY/evidence" --progress plain "$JOB_DIRECTORY/source"
@@ -61,7 +75,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: publisher-checks-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ steps.private_job.outputs.directory }}/evidence/publisher-checks.txt
+          path: |
+            ${{ steps.private_job.outputs.directory }}/evidence/publisher-checks.txt
+            ${{ steps.private_job.outputs.directory }}/evidence/lapkb-release-verifier
+            ${{ steps.private_job.outputs.directory }}/evidence/lapkb-release-verifier.sha256
           if-no-files-found: error
           retention-days: 7
 

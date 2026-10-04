@@ -31,12 +31,15 @@ COPY tests/ ./tests/
 ARG PUBLISHER_SOURCE_SHA
 ARG PUBLISHER_RUN_ID
 ARG PUBLISHER_RUN_ATTEMPT
+ARG TARGETARCH
 # This executes publisher regression suites, not applications or NSIS installers.
 RUN --network=none set -eu; \
     npm test; \
     LAPKB_PUBLISHER_ISOLATED_CI=1 sh scripts/test-publisher.sh; \
     install -d /out; \
-    printf 'publisher-source=%s\nrun=%s\nattempt=%s\nchecks=metadata schemas, verifier, synthetic publisher/client/pickup regressions\nnetwork=none during all checks\nproduct-signing-publication-native-Windows=not performed\n' \
-      "$PUBLISHER_SOURCE_SHA" "$PUBLISHER_RUN_ID" "$PUBLISHER_RUN_ATTEMPT" > /out/publisher-checks.txt
+    cp host/verifier/target/release/lapkb-release-verifier /out/lapkb-release-verifier; \
+    (cd /out && sha256sum lapkb-release-verifier > lapkb-release-verifier.sha256); \
+    printf 'publisher-source=%s\nrun=%s\nattempt=%s\nnative-linux-architecture=%s\nchecks=metadata schemas, verifier, synthetic publisher/client/pickup regressions\nnetwork=none during all checks\nproduct-signing-publication-native-Windows=not performed\n' \
+      "$PUBLISHER_SOURCE_SHA" "$PUBLISHER_RUN_ID" "$PUBLISHER_RUN_ATTEMPT" "$TARGETARCH" > /out/publisher-checks.txt
 FROM scratch AS ci-evidence
 COPY --from=publisher-tests /out/ /
