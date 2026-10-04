@@ -1,0 +1,15 @@
+[package]
+name = "lapkb-release-verifier"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "lapkb-release-verifier"
+path = "src/main.rs"
+
+[dependencies]
+minisign-verify = "=0.2.5"
+
+[dev-dependencies]
+minisign = "=0.9.1"

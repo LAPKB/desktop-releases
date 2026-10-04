@@ -2,28 +2,73 @@ name: Validate desktop release metadata
 
 on:
   push:
-  pull_request:
+    branches: [launcher]
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    if: github.repository == 'LAPKB/desktop-releases' && github.ref == 'refs/heads/launcher'
+    runs-on:
+      group: Default
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PYTHONDONTWRITEBYTECODE: "1"
+      GIT_TERMINAL_PROMPT: "0"
     steps:
-      - name: Check out metadata
+      - name: Check out the exact reviewed metadata commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
+          path: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
           persist-credentials: false
 
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - name: Create an identity-bound private jobs2 directory
+        id: private_job
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          job="$(mktemp -d "$RUNNER_TEMP/publisher-jobs2.XXXXXXXXXX")"
+          job="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$job")"
+          chmod 700 "$job"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$job")"
+          printf 'directory=%s\nidentity=%s\n' "$job" "$identity" >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$job" publisher-jobs2 "$identity"
+          mkdir -m 700 "$job/source" "$job/evidence"
+          git archive "$GITHUB_SHA" | tar -xf - -C "$job/source"
+
+      - name: Run only publisher checks in pinned credential-free networkless test layers
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
+          JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
+          docker buildx build --file "$JOB_DIRECTORY/source/scripts/ci/publisher.Dockerfile" \
+            --target ci-evidence --build-arg PUBLISHER_SOURCE_SHA="$GITHUB_SHA" \
+            --build-arg PUBLISHER_RUN_ID="$GITHUB_RUN_ID" --build-arg PUBLISHER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            --output "type=local,dest=$JOB_DIRECTORY/evidence" --progress plain "$JOB_DIRECTORY/source"
+
+      - name: Retain actual confined publisher CI evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          node-version: 22
-          cache: npm
+          name: publisher-checks-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.private_job.outputs.directory }}/evidence/publisher-checks.txt
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Install validation dependencies
-        run: npm ci
-
-      - name: Validate schemas and channels
-        run: npm test
+      - name: Identity-confined cleanup of this private job only
+        if: always()
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
+          JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"

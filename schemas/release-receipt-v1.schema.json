@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/LAPKB/desktop-releases/main/schemas/release-receipt-v1.schema.json",
+  "title": "LAPKB deterministic release receipt v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "app", "channel", "version", "source", "buildAttestationSha256", "manifestSha256", "signatureKeyId", "targets"],
+  "properties": {
+    "schema": {"const": "release-receipt-v1"},
+    "app": {"enum": ["launcher", "papir", "bestdose", "bdautodial", "checkerboard"]}, "channel": {"enum": ["stable", "beta"]},
+    "version": {"$ref": "build-attestation-v1.schema.json#/$defs/version"},
+    "source": {"$ref": "build-attestation-v1.schema.json#/$defs/source"},
+    "coverage": {"enum": ["windows-x64"]}, "feed": {"const": "latest-windows.json"}, "distribution": {"const": "manual-checksum"},
+    "buildAttestationSha256": {"$ref": "build-attestation-v1.schema.json#/$defs/hash"},
+    "manifestSha256": {"$ref": "build-attestation-v1.schema.json#/$defs/hash"},
+    "signatureKeyId": {"anyOf": [{"type": "null"}, {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"}]},
+    "targets": {"type": "object"}
+  },
+  "allOf": [{
+    "if": {"required": ["coverage"], "properties": {"coverage": {"const": "windows-x64"}}},
+    "then": {
+      "required": ["feed"],
+      "properties": {
+        "channel": {"const": "stable"},
+        "source": {"type": "object", "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}},
+        "targets": {
+          "type": "object", "additionalProperties": false, "required": ["windows-x86_64"],
+          "properties": {"windows-x86_64": {"$ref": "#/$defs/windows-target"}}
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "app": {"enum": ["papir", "bestdose", "bdautodial", "checkerboard"]}, "distribution": false,
+            "signatureKeyId": {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"},
+            "targets": {"type": "object", "properties": {"windows-x86_64": {
+              "type": "object", "required": ["installerSignature"], "properties": {
+                "installerSignature": {"type": "string", "minLength": 1, "maxLength": 16384},
+                "roles": {"type": "object", "properties": {"updater": {"$ref": "build-attestation-v1.schema.json#/$defs/name"}}},
+                "artifacts": {"type": "array", "items": {"type": "object", "properties": {
+                  "roles": {"const": ["installer", "updater"]}, "signatureKeyId": {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"}
+                }}}
+              }
+            }}}
+          }
+        },
+        {
+          "required": ["distribution"],
+          "properties": {
+            "app": {"const": "launcher"}, "distribution": {"const": "manual-checksum"}, "signatureKeyId": {"type": "null"},
+            "targets": {"type": "object", "properties": {"windows-x86_64": {"type": "object", "properties": {
+              "installerSignature": false, "roles": {"type": "object", "properties": {"updater": {"type": "null"}}},
+              "artifacts": {"type": "array", "items": {"type": "object", "properties": {"roles": {"const": ["installer"]}, "signatureKeyId": {"type": "null"}}}}
+            }}}}
+          }
+        }
+      ]
+    },
+    "else": {"properties": {"feed": false, "distribution": false, "signatureKeyId": {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"}, "targets": {"$ref": "#/$defs/full-six-targets"}}}
+  }],
+  "$defs": {
+    "roles": {
+      "type": "object", "additionalProperties": false, "required": ["installer", "updater"],
+      "properties": {
+        "installer": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": {"$ref": "build-attestation-v1.schema.json#/$defs/name"}},
+        "updater": {"anyOf": [{"type": "null"}, {"$ref": "build-attestation-v1.schema.json#/$defs/name"}]}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["name", "kind", "roles", "size", "sha256", "signatureKeyId"],
+      "properties": {
+        "name": {"$ref": "build-attestation-v1.schema.json#/$defs/name"}, "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "roles": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["installer", "updater"]}},
+        "size": {"type": "integer", "minimum": 1, "maximum": 2147483648}, "sha256": {"$ref": "build-attestation-v1.schema.json#/$defs/hash"},
+        "signatureKeyId": {"anyOf": [{"type": "null"}, {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"}]}
+      },
+      "allOf": [{
+        "if": {"properties": {"roles": {"type": "array", "contains": {"const": "updater"}}}},
+        "then": {"properties": {"signatureKeyId": {"$ref": "build-attestation-v1.schema.json#/$defs/key-id"}}},
+        "else": {"properties": {"signatureKeyId": {"type": "null"}}}
+      }]
+    },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "roles", "artifacts"],
+      "properties": {
+        "packageIdentity": {"$ref": "build-attestation-v1.schema.json#/$defs/identity"},
+        "roles": {"allOf": [{"$ref": "#/$defs/roles"}, {"type": "object", "properties": {"updater": {"$ref": "build-attestation-v1.schema.json#/$defs/name"}}}]},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    },
+    "target-aarch64": {"allOf": [{"$ref": "#/$defs/target"}, {"type": "object", "properties": {"packageIdentity": {"type": "object", "properties": {"architecture": {"const": "aarch64"}}}}}]},
+    "target-x86_64": {"allOf": [{"$ref": "#/$defs/target"}, {"type": "object", "properties": {"packageIdentity": {"type": "object", "properties": {"architecture": {"const": "x86_64"}}}}}]},
+    "full-six-targets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["darwin-aarch64", "darwin-x86_64", "windows-aarch64", "windows-x86_64", "linux-aarch64", "linux-x86_64"],
+      "properties": {
+        "darwin-aarch64": {"$ref": "#/$defs/target-aarch64"}, "darwin-x86_64": {"$ref": "#/$defs/target-x86_64"},
+        "windows-aarch64": {"$ref": "#/$defs/target-aarch64"}, "windows-x86_64": {"$ref": "#/$defs/target-x86_64"},
+        "linux-aarch64": {"$ref": "#/$defs/target-aarch64"}, "linux-x86_64": {"$ref": "#/$defs/target-x86_64"}
+      }
+    },
+    "windows-target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "roles", "artifacts", "build", "windowsPayload"],
+      "properties": {
+        "packageIdentity": {"allOf": [{"$ref": "build-attestation-v1.schema.json#/$defs/identity"}, {"type": "object", "properties": {"architecture": {"const": "x86_64"}}}]},
+        "roles": {"$ref": "#/$defs/roles"},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"allOf": [{"$ref": "#/$defs/artifact"}, {"type": "object", "properties": {"kind": {"const": "nsis"}, "size": {"type": "integer", "maximum": 268435456}}}]}},
+        "build": {"$ref": "build-attestation-v1.schema.json#/$defs/windows-build"},
+        "windowsPayload": {"$ref": "build-attestation-v1.schema.json#/$defs/windows-payload"},
+        "installerSignature": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    }
+  }
+}

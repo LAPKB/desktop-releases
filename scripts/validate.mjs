@@ -27,6 +27,10 @@ const schemas = {
   source: readJson("schemas/app-source-v1.schema.json"),
   launcher: readJson("schemas/launcher-catalog-v1.schema.json"),
   update: readJson("schemas/update-catalog-v1.schema.json"),
+  buildAttestation: readJson("schemas/build-attestation-v1.schema.json"),
+  receipt: readJson("schemas/release-receipt-v1.schema.json"),
+  publisherTrust: readJson("schemas/publisher-trust-v1.schema.json"),
+  pickupConfig: readJson("schemas/pickup-config-v1.schema.json"),
 };
 
 for (const [name, schema] of Object.entries(schemas)) {

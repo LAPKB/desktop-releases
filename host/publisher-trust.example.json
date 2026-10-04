@@ -1,0 +1,15 @@
+{
+  "schema": "lapkb-publisher-trust-v1",
+  "root": null,
+  "origin": null,
+  "pickupRepository": null,
+  "checkmateMinimumVersion": null,
+  "legacyAliases": {
+    "launcher": {"stable": null, "beta": null},
+    "papir": {"stable": null, "beta": null},
+    "bestdose": {"stable": null, "beta": null},
+    "bdautodial": {"stable": null, "beta": null},
+    "checkerboard": {"stable": null, "beta": null}
+  },
+  "apps": {}
+}

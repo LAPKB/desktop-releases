@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/LAPKB/desktop-releases/main/schemas/pickup-config-v1.schema.json",
+  "title": "Private publisher pickup configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "enabled", "repository"],
+  "properties": {
+    "schema": {"const": "lapkb-pickup-v1"},
+    "enabled": {"const": true},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+  }
+}

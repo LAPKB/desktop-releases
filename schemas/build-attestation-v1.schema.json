@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/LAPKB/desktop-releases/main/schemas/build-attestation-v1.schema.json",
+  "title": "LAPKB build attestation v1 (signed releases or explicit manual Launcher)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "app", "channel", "version", "source", "targets"],
+  "properties": {
+    "schema": {"const": "lapkb-build-attestation-v1"},
+    "app": {"enum": ["launcher", "papir", "bestdose", "bdautodial", "checkerboard"]},
+    "channel": {"enum": ["stable", "beta"]},
+    "version": {"$ref": "#/$defs/version"},
+    "coverage": {"enum": ["full-six", "windows-x64"]},
+    "distribution": {"const": "manual-checksum"},
+    "source": {"$ref": "#/$defs/source"},
+    "notes": {"type": "string", "maxLength": 16384},
+    "pub_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"},
+    "targets": {"type": "object"}
+  },
+  "allOf": [{
+    "if": {"required": ["coverage"], "properties": {"coverage": {"const": "windows-x64"}}},
+    "then": {
+      "properties": {
+        "channel": {"const": "stable"},
+        "source": {"type": "object", "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}},
+        "notes": {"type": "string", "maxLength": 4096},
+        "targets": {
+          "type": "object", "additionalProperties": false, "required": ["windows-x86_64"],
+          "properties": {"windows-x86_64": {"$ref": "#/$defs/windows-target"}}
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "app": {"enum": ["papir", "bestdose", "bdautodial", "checkerboard"]},
+            "distribution": false,
+            "targets": {"type": "object", "properties": {"windows-x86_64": {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"$ref": "#/$defs/signed-nsis"}}}}}}
+          }
+        },
+        {
+          "required": ["distribution"],
+          "properties": {
+            "app": {"const": "launcher"}, "distribution": {"const": "manual-checksum"},
+            "targets": {"type": "object", "properties": {"windows-x86_64": {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"$ref": "#/$defs/manual-nsis"}}}}}}
+          }
+        }
+      ]
+    },
+    "else": {
+      "properties": {"distribution": false, "targets": {"$ref": "#/$defs/full-six-targets"}}
+    }
+  }],
+  "$defs": {
+    "version": {"type": "string", "maxLength": 32, "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "key-id": {"type": "string", "pattern": "^[0-9A-F]{16}$"},
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$"},
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "branch", "commit", "tag"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 128},
+        "commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "tag": {"type": "string", "minLength": 1, "maxLength": 200}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bundleIdentifier", "displayName", "executable", "architecture", "version"],
+      "properties": {
+        "bundleIdentifier": {"type": "string", "minLength": 1, "maxLength": 128},
+        "displayName": {"type": "string", "minLength": 1, "maxLength": 128},
+        "executable": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "architecture": {"enum": ["aarch64", "x86_64"]}, "version": {"$ref": "#/$defs/version"}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "kind", "roles", "size", "sha256", "signatureKeyId", "updaterSignature"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"}, "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "roles": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["installer", "updater"]}},
+        "size": {"type": "integer", "minimum": 1, "maximum": 2147483648}, "sha256": {"$ref": "#/$defs/hash"},
+        "signatureKeyId": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/key-id"}]},
+        "updaterSignature": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 90000}]}
+      },
+      "allOf": [{
+        "if": {"properties": {"roles": {"type": "array", "contains": {"const": "updater"}}}},
+        "then": {"properties": {"signatureKeyId": {"$ref": "#/$defs/key-id"}, "updaterSignature": {"type": "string", "minLength": 1}}},
+        "else": {"properties": {"signatureKeyId": {"type": "null"}, "updaterSignature": {"type": "null"}}}
+      }]
+    },
+    "signed-nsis": {
+      "type": "object", "properties": {
+        "kind": {"const": "nsis"}, "roles": {"const": ["installer", "updater"]},
+        "size": {"type": "integer", "maximum": 268435456}, "signatureKeyId": {"$ref": "#/$defs/key-id"},
+        "updaterSignature": {"type": "string", "minLength": 1, "maxLength": 16384}
+      }
+    },
+    "manual-nsis": {
+      "type": "object", "properties": {
+        "kind": {"const": "nsis"}, "roles": {"const": ["installer"]}, "size": {"type": "integer", "maximum": 268435456},
+        "signatureKeyId": {"type": "null"}, "updaterSignature": {"type": "null"}
+      }
+    },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "artifacts"],
+      "properties": {
+        "packageIdentity": {"$ref": "#/$defs/identity"},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    },
+    "target-aarch64": {"allOf": [{"$ref": "#/$defs/target"}, {"type": "object", "properties": {"packageIdentity": {"type": "object", "properties": {"architecture": {"const": "aarch64"}}}}}]},
+    "target-x86_64": {"allOf": [{"$ref": "#/$defs/target"}, {"type": "object", "properties": {"packageIdentity": {"type": "object", "properties": {"architecture": {"const": "x86_64"}}}}}]},
+    "full-six-targets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["darwin-aarch64", "darwin-x86_64", "windows-aarch64", "windows-x86_64", "linux-aarch64", "linux-x86_64"],
+      "properties": {
+        "darwin-aarch64": {"$ref": "#/$defs/target-aarch64"}, "darwin-x86_64": {"$ref": "#/$defs/target-x86_64"},
+        "windows-aarch64": {"$ref": "#/$defs/target-aarch64"}, "windows-x86_64": {"$ref": "#/$defs/target-x86_64"},
+        "linux-aarch64": {"$ref": "#/$defs/target-aarch64"}, "linux-x86_64": {"$ref": "#/$defs/target-x86_64"}
+      }
+    },
+    "windows-build": {
+      "type": "object", "additionalProperties": false, "required": ["runId", "runAttempt", "profile"],
+      "properties": {"runId": {"type": "string", "pattern": "^[1-9][0-9]{0,19}$"}, "runAttempt": {"type": "integer", "minimum": 1, "maximum": 1000}, "profile": {"const": "public-staging"}}
+    },
+    "windows-payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "productName", "executable", "architecture", "version", "installMode", "files"],
+      "properties": {
+        "schema": {"const": "lapkb-windows-payload-v1"}, "productName": {"type": "string", "minLength": 1, "maxLength": 128},
+        "executable": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.exe$"},
+        "architecture": {"const": "x86_64"}, "version": {"$ref": "#/$defs/version"}, "installMode": {"const": "currentUser"},
+        "files": {
+          "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["path", "size", "sha256"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[. ](?:/|$))(?!.*(?:^|/)(?:[cC][oO][nN](?:[iI][nN]\\$|[oO][uU][tT]\\$)?|[pP][rR][nN]|[aA][uU][xX]|[nN][uU][lL]|[cC][oO][mM][1-9¹²³]|[lL][pP][tT][1-9¹²³])(?:\\.|/|$))(?!.*[\\\\:<>\"|?*\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"},
+              "size": {"type": "integer", "minimum": 0, "maximum": 1073741824}, "sha256": {"$ref": "#/$defs/hash"}
+            }
+          }
+        }
+      }
+    },
+    "windows-target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "artifacts", "build", "windowsPayload"],
+      "properties": {
+        "packageIdentity": {"allOf": [{"$ref": "#/$defs/identity"}, {"type": "object", "properties": {"architecture": {"const": "x86_64"}}}]},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+        "build": {"$ref": "#/$defs/windows-build"}, "windowsPayload": {"$ref": "#/$defs/windows-payload"}
+      }
+    }
+  }
+}

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "npm run validate",
+    "test": "npm run validate && node --test scripts/schema-contract.test.mjs",
     "validate": "node scripts/validate.mjs"
   },
   "devDependencies": {

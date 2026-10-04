@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!host/
+!host/**
+host/verifier/target/
+!scripts/
+!scripts/**
+!schemas/
+!schemas/**
+!channels/
+!channels/**
+!tests/
+!tests/**
+**/__pycache__/
+**/*.pyc
