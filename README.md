@@ -196,10 +196,16 @@ cannot initialize history or change trust.
 The existing validation workflow defaults to the approved Default self-hosted
 Linux X64 group. Its manual `runner_arch` choice can select native Linux ARM64
 on the existing `rust` group; it does not create capacity or change runner grants.
-The same job exports its locked release verifier and SHA-256 alongside its exact
-source/run/attempt and native-architecture check receipt. It retains a private
-identity-bound jobs2 directory, already approved pinned Node/Rust tool images,
-locked credential-free dependency preparation, and networkless publisher tests. Identity-confined cleanup reuses the maintained approved helper.
+Manual ARM64 export uses Rust 1.97.1 in the same private identity-bound jobs2
+directory. It fetches locked dependencies separately without credentials, then
+builds/tests only the verifier offline with two jobs. Rust's bundled linker and
+musl standard library produce `aarch64-unknown-linux-musl`; export rejects any
+external loader or shared-library requirement and records the actual ELF header,
+toolchain, source/run/attempt and SHA-256. It never builds the signer example or
+runs the fixed-path Python fixture on the CI host. Default X64 validation keeps
+the pinned Docker-based full publisher regressions and their networkless test
+layers. Both modes reuse the maintained identity-confined cleanup and artifact
+output.
 `npm test` validates schemas/catalogs and structural schema regressions;
 `scripts/test-publisher.sh` builds/tests the locked verifier and exercises real
 synthetic-signature publisher/client/pickup, mixed-history, conflict/retry,

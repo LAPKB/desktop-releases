@@ -25,6 +25,9 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       PYTHONDONTWRITEBYTECODE: "1"
       GIT_TERMINAL_PROMPT: "0"
+      PUBLISHER_NATIVE_EXPORT: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_arch == 'ARM64' }}
+      PUBLISHER_TOOLCHAIN: 1.97.1-aarch64-unknown-linux-gnu
+      PUBLISHER_RUST_TARGET: aarch64-unknown-linux-musl
     steps:
       - name: Check out the exact reviewed metadata commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -49,8 +52,114 @@ jobs:
           python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$job" publisher-jobs2 "$identity"
           mkdir -m 700 "$job/source" "$job/evidence"
           git archive "$GITHUB_SHA" | tar -xf - -C "$job/source"
+          if [ "$PUBLISHER_NATIVE_EXPORT" = true ]; then
+            test "$RUNNER_OS" = Linux
+            test "$RUNNER_ARCH" = ARM64
+            test "$(uname -m)" = aarch64
+            # Reuse the Rust worker's rustup, never bootstrap/install global tools.
+            command -v rustup
+            command -v readelf
+            mkdir -m 700 "$job/home" "$job/cargo" "$job/rustup" "$job/target" "$job/tmp" "$job/cache"
+            printf 'HOME=%s/home\nCARGO_HOME=%s/cargo\nRUSTUP_HOME=%s/rustup\nCARGO_TARGET_DIR=%s/target\nTMPDIR=%s/tmp\nXDG_CACHE_HOME=%s/cache\n' \
+              "$job" "$job" "$job" "$job" "$job" "$job" >> "$GITHUB_ENV"
+            printf 'CARGO_INCREMENTAL=0\nCARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse\nGIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nGIT_SSH_COMMAND=/usr/bin/false\n' >> "$GITHUB_ENV"
+          fi
+
+      - name: Install the existing CI-pinned Rust toolchain privately
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_arch == 'ARM64'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.PUBLISHER_TOOLCHAIN }}
+          targets: ${{ env.PUBLISHER_RUST_TARGET }}
+
+      - name: Fetch only locked verifier dependencies without credentials
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_arch == 'ARM64'
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
+          JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
+          tools="$RUSTUP_HOME/toolchains/$PUBLISHER_TOOLCHAIN/bin"
+          test -x "$tools/cargo"
+          test -x "$tools/rustc"
+          env -i PATH="$tools:/usr/bin:/bin" HOME="$HOME" CARGO_HOME="$CARGO_HOME" \
+            RUSTUP_HOME="$RUSTUP_HOME" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" TMPDIR="$TMPDIR" \
+            XDG_CACHE_HOME="$XDG_CACHE_HOME" CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 \
+            CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse GIT_TERMINAL_PROMPT=0 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/usr/bin/false \
+            cargo fetch --locked --target "$PUBLISHER_RUST_TARGET" \
+              --manifest-path "$JOB_DIRECTORY/source/host/verifier/Cargo.toml"
+
+      - name: Build and test only the native verifier offline, then record its actual ABI
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_arch == 'ARM64'
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
+          JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LC_ALL=C
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
+          tools="$RUSTUP_HOME/toolchains/$PUBLISHER_TOOLCHAIN/bin"
+          "$tools/rustc" --version --verbose > "$JOB_DIRECTORY/rustc-version.txt"
+          grep -qx 'release: 1.97.1' "$JOB_DIRECTORY/rustc-version.txt"
+          grep -qx 'host: aarch64-unknown-linux-gnu' "$JOB_DIRECTORY/rustc-version.txt"
+          sysroot="$("$tools/rustc" --print sysroot)"
+          test "$sysroot" = "$RUSTUP_HOME/toolchains/$PUBLISHER_TOOLCHAIN"
+          # Rust's pinned musl std/CRT and bundled LLD need no system musl/GCC install.
+          linker="$sysroot/lib/rustlib/aarch64-unknown-linux-gnu/bin/rust-lld"
+          test -x "$linker"
+          native_env=(env -i PATH="$tools:/usr/bin:/bin" HOME="$HOME" CARGO_HOME="$CARGO_HOME"
+            RUSTUP_HOME="$RUSTUP_HOME" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" TMPDIR="$TMPDIR"
+            XDG_CACHE_HOME="$XDG_CACHE_HOME" CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+            CARGO_NET_OFFLINE=true GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null
+            GIT_CONFIG_NOSYSTEM=1 GIT_SSH_COMMAND=/usr/bin/false
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$linker"
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C linker-flavor=gnu-lld -C link-self-contained=yes -C target-feature=+crt-static')
+          "${native_env[@]}" cargo build --release --locked --offline --jobs 2 \
+            --bin lapkb-release-verifier --target "$PUBLISHER_RUST_TARGET" \
+            --manifest-path "$JOB_DIRECTORY/source/host/verifier/Cargo.toml"
+          # Only this binary's Rust unit tests; never compile/run the signer example
+          # or the container-only fixed-path publisher/Python fixture on the host.
+          "${native_env[@]}" cargo test --release --locked --offline --jobs 2 \
+            --bin lapkb-release-verifier --target "$PUBLISHER_RUST_TARGET" \
+            --manifest-path "$JOB_DIRECTORY/source/host/verifier/Cargo.toml"
+          cmp "$JOB_DIRECTORY/source/host/verifier/Cargo.lock" host/verifier/Cargo.lock
+          binary="$CARGO_TARGET_DIR/$PUBLISHER_RUST_TARGET/release/lapkb-release-verifier"
+          readelf --file-header "$binary" > "$JOB_DIRECTORY/elf-header.txt"
+          readelf --program-headers --wide "$binary" > "$JOB_DIRECTORY/elf-program-headers.txt"
+          readelf --dynamic --wide "$binary" > "$JOB_DIRECTORY/elf-dynamic.txt"
+          grep -Eq 'Class: +ELF64' "$JOB_DIRECTORY/elf-header.txt"
+          grep -Eq "Data: +2's complement, little endian" "$JOB_DIRECTORY/elf-header.txt"
+          grep -Eq 'Machine: +AArch64' "$JOB_DIRECTORY/elf-header.txt"
+          grep -Eq 'Type: +(EXEC|DYN) ' "$JOB_DIRECTORY/elf-header.txt"
+          if grep -q 'INTERP' "$JOB_DIRECTORY/elf-program-headers.txt" \
+            || grep -q '(NEEDED)' "$JOB_DIRECTORY/elf-dynamic.txt"; then
+            echo 'Refusing export: verifier requires an external loader/shared library' >&2
+            exit 1
+          fi
+          install -m 700 "$binary" "$JOB_DIRECTORY/evidence/lapkb-release-verifier"
+          (cd "$JOB_DIRECTORY/evidence" && sha256sum lapkb-release-verifier > lapkb-release-verifier.sha256)
+          {
+            printf 'publisher-source=%s\nrun=%s\nattempt=%s\nrun-url=%s/%s/actions/runs/%s\nrunner=%s\nrunner-group=rust\nrust-toolchain=%s\nrust-target=%s\n' \
+              "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+              "$GITHUB_RUN_ID" "$RUNNER_NAME" "$PUBLISHER_TOOLCHAIN" "$PUBLISHER_RUST_TARGET"
+            printf 'abi=ELF64 little-endian Linux AArch64 static musl\nexternal-loader=none\nshared-library-requirements=none\njobs=2\nbuild=release locked offline bin-only\nchecks=native Rust verifier unit tests passed\nfull-publisher-regressions=not run; retained in default X64 Docker validation\nproduct-signing-publication-native-Windows=not performed\n'
+            (cd "$JOB_DIRECTORY/source" && sha256sum host/verifier/Cargo.toml host/verifier/Cargo.lock host/verifier/src/main.rs)
+            cat "$JOB_DIRECTORY/rustc-version.txt"
+            "$tools/cargo" --version --verbose
+            cat "$JOB_DIRECTORY/elf-header.txt" "$JOB_DIRECTORY/elf-program-headers.txt" "$JOB_DIRECTORY/elf-dynamic.txt"
+            cat "$JOB_DIRECTORY/evidence/lapkb-release-verifier.sha256"
+          } > "$JOB_DIRECTORY/evidence/publisher-checks.txt"
 
       - name: Run only publisher checks in pinned credential-free networkless test layers
+        if: github.event_name != 'workflow_dispatch' || inputs.runner_arch != 'ARM64'
         working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
