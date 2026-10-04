@@ -34,7 +34,7 @@ ARG PUBLISHER_RUN_ATTEMPT
 # This executes publisher regression suites, not applications or NSIS installers.
 RUN --network=none set -eu; \
     npm test; \
-    sh scripts/test-publisher.sh; \
+    LAPKB_PUBLISHER_ISOLATED_CI=1 sh scripts/test-publisher.sh; \
     install -d /out; \
     printf 'publisher-source=%s\nrun=%s\nattempt=%s\nchecks=metadata schemas, verifier, synthetic publisher/client/pickup regressions\nnetwork=none during all checks\nproduct-signing-publication-native-Windows=not performed\n' \
       "$PUBLISHER_SOURCE_SHA" "$PUBLISHER_RUN_ID" "$PUBLISHER_RUN_ATTEMPT" > /out/publisher-checks.txt

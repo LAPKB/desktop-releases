@@ -159,7 +159,18 @@ The workstation validates the complete bundle, uses pinned SSH with explicit
 and every immutable file over the configured HTTPS origin. Response coverage,
 feed, targets, distribution, version and inventory digest must match the locally
 validated release. Proxies, redirects, ambient SSH agents and credential fallback
-remain disabled.
+remain disabled. The wrapper accepts exactly
+`python3 /home/siel/bin/publish_remote.py --receive-v1` and executes that fixed
+receiver with `/usr/bin/python3`; positional, extra and administrative arguments
+are rejected.
+
+If the same approved origin is reached at a different address, optional
+`LAPKB_PUBLISH_HOST_KEY_ALIAS` selects its **existing exact pin** in the explicit
+known-hosts file. For the established transport, set `LAPKB_PUBLISH_HOST=100.84.10.45`
+and `LAPKB_PUBLISH_HOST_KEY_ALIAS=192.168.0.74`. The alias must be a nonempty ASCII
+host token (letters, digits, dots and hyphens, starting with a letter or digit).
+Leaving it unset uses the destination host normally; empty/whitespace/options are
+rejected. This does not add a key/pin or enable SSH config, proxies or agents.
 
 ```text
 python3 scripts/publish_artifact.py --app <approved-app> --channel stable \
@@ -183,7 +194,11 @@ publisher tests. Identity-confined cleanup reuses the maintained approved helper
 `scripts/test-publisher.sh` builds/tests the locked verifier and exercises real
 synthetic-signature publisher/client/pickup, mixed-history, conflict/retry,
 bootstrap and every journal checkpoint regression. Run these **only in approved
-CI**, not on the owner's application workstation.
+CI**, not on the owner's application workstation. The fixed-path wrapper seam
+fixture runs only in that credential-free container with its explicit
+`LAPKB_PUBLISHER_ISOLATED_CI=1` marker; it refuses existing fixed-path files,
+uses the maintained receiver/contract and locked verifier with synthetic trust,
+and removes its fixtures. It is not product signing or origin activation.
 
 These checks do not establish genuine release custody/signatures, publication,
 native Windows installation or application acceptance. The existing legacy

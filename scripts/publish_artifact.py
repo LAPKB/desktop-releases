@@ -78,9 +78,9 @@ def _owned_regular_file(path, *, private=False):
         os.close(parent_fd)
 
 
-def _valid_host(value):
+def _valid_host(value, name="LAPKB_PUBLISH_HOST"):
     if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", value):
-        raise ContractError("LAPKB_PUBLISH_HOST is invalid")
+        raise ContractError(f"{name} is invalid")
     return value
 
 
@@ -89,12 +89,15 @@ def _ssh_command():
     known_hosts = _owned_regular_file(_required("LAPKB_PUBLISH_KNOWN_HOSTS"))
     user = _required("LAPKB_PUBLISH_USER")
     host = _valid_host(_required("LAPKB_PUBLISH_HOST"))
+    host_key_alias = os.environ.get("LAPKB_PUBLISH_HOST_KEY_ALIAS")
+    if host_key_alias is not None:
+        _valid_host(host_key_alias, "LAPKB_PUBLISH_HOST_KEY_ALIAS")
     port_text = os.environ.get("LAPKB_PUBLISH_PORT", "22")
     if not re.fullmatch(r"[0-9]{1,5}", port_text) or not 1 <= int(port_text) <= 65535:
         raise ContractError("LAPKB_PUBLISH_PORT is invalid")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
         raise ContractError("LAPKB_PUBLISH_USER is invalid")
-    return [
+    command = [
         "/usr/bin/ssh", "-F", "/dev/null", "-i", str(key), "-p", port_text,
         "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
         "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
@@ -104,8 +107,11 @@ def _ssh_command():
         "-o", "ControlPath=none", "-o", "PreferredAuthentications=publickey",
         "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
         "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3", f"{user}@{host}", REMOTE_COMMAND,
+        "-o", "ServerAliveCountMax=3",
     ]
+    if host_key_alias is not None:
+        command.extend(["-o", f"HostKeyAlias={host_key_alias}"])
+    return command + [f"{user}@{host}", REMOTE_COMMAND]
 
 
 def _secure_bundle_dir(path):

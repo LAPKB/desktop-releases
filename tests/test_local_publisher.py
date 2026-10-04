@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -142,27 +143,73 @@ class LocalPublisherTests(unittest.TestCase):
             path.write_bytes(data)
             os.chmod(path, 0o600)
 
+    def _assert_ssh_restrictions(self, command, *, host="publisher.example.test", alias=None):
+        self.assertEqual(command[:7], ["/usr/bin/ssh", "-F", "/dev/null", "-i", str(self.key), "-p", "2222"])
+        self.assertEqual(command[-2:], [f"publisher@{host}", publish_artifact.REMOTE_COMMAND])
+        options = command[7:-2]
+        self.assertEqual(len(options) % 2, 0)
+        self.assertTrue(all(value == "-o" for value in options[::2]))
+        expected = {
+            "BatchMode": "yes", "IdentitiesOnly": "yes", "IdentityAgent": "none",
+            "StrictHostKeyChecking": "yes", "UserKnownHostsFile": str(self.known_hosts),
+            "GlobalKnownHostsFile": "/dev/null", "UpdateHostKeys": "no", "VerifyHostKeyDNS": "no",
+            "ForwardAgent": "no", "ClearAllForwardings": "yes", "ProxyCommand": "none", "ProxyJump": "none",
+            "ControlMaster": "no", "ControlPath": "none", "PreferredAuthentications": "publickey",
+            "PasswordAuthentication": "no", "KbdInteractiveAuthentication": "no", "ConnectTimeout": "15",
+            "ServerAliveInterval": "30", "ServerAliveCountMax": "3",
+        }
+        if alias is not None:
+            expected["HostKeyAlias"] = alias
+            self.assertEqual(command[-4:-2], ["-o", f"HostKeyAlias={alias}"])
+        self.assertEqual(len(options), 2 * len(expected))
+        self.assertEqual(dict(value.split("=", 1) for value in options[1::2]), expected)
+
     def test_ssh_command_requires_explicit_files_and_disables_ambient_auth_and_proxies(self):
         with mock.patch.dict(os.environ, self.environment, clear=True):
             command = publish_artifact._ssh_command()
-        self.assertEqual(command[0], "/usr/bin/ssh")
-        self.assertIn("IdentityAgent=none", command)
-        self.assertIn("StrictHostKeyChecking=yes", command)
-        self.assertIn("ProxyCommand=none", command)
-        self.assertIn("ProxyJump=none", command)
-        self.assertIn("ForwardAgent=no", command)
-        self.assertIn("publisher@publisher.example.test", command)
-        self.assertEqual(command[-1], publish_artifact.REMOTE_COMMAND)
-        self.assertNotIn("ForwardAgent=yes", command)
+        self._assert_ssh_restrictions(command)
+        self.assertFalse(any(value.startswith("HostKeyAlias=") for value in command))
         with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": "/synthetic/agent"}, clear=True):
             with self.assertRaisesRegex(contract.ContractError, "LAPKB_PUBLISH_KEY is required"):
                 publish_artifact._ssh_command()
 
-        link = self.credentials / "key-link"
-        link.symlink_to(self.key)
-        with mock.patch.dict(os.environ, {**self.environment, "LAPKB_PUBLISH_KEY": str(link)}, clear=True):
-            with self.assertRaisesRegex(contract.ContractError, "credential file"):
-                publish_artifact._ssh_command()
+        environment = {**self.environment, "LAPKB_PUBLISH_HOST_KEY_ALIAS": "192.168.0.74"}
+        for variable, source in (("LAPKB_PUBLISH_KEY", self.key), ("LAPKB_PUBLISH_KNOWN_HOSTS", self.known_hosts)):
+            link = self.credentials / (source.name + "-link")
+            link.symlink_to(source)
+            with self.subTest(variable=variable, unsafe="link"), \
+                    mock.patch.dict(os.environ, {**environment, variable: str(link)}, clear=True):
+                with self.assertRaisesRegex(contract.ContractError, "credential file"):
+                    publish_artifact._ssh_command()
+            os.chmod(source, 0o666)
+            try:
+                with self.subTest(variable=variable, unsafe="permissions"), \
+                        mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(contract.ContractError, "credential file"):
+                        publish_artifact._ssh_command()
+            finally:
+                os.chmod(source, 0o600)
+
+    def test_optional_host_key_alias_reuses_only_the_explicit_pin(self):
+        for alias in ("192.168.0.74", "publisher-pin.example.test", "Pin-1"):
+            environment = {**self.environment, "LAPKB_PUBLISH_HOST": "100.84.10.45",
+                           "LAPKB_PUBLISH_HOST_KEY_ALIAS": alias, "SSH_AUTH_SOCK": "/synthetic/agent"}
+            with self.subTest(alias=alias), mock.patch.dict(os.environ, environment, clear=True):
+                command = publish_artifact._ssh_command()
+            self._assert_ssh_restrictions(command, host="100.84.10.45", alias=alias)
+
+    def test_host_key_alias_rejects_empty_whitespace_options_and_controls(self):
+        for alias in ("", " ", "192.168.0.74 ", " 192.168.0.74", "pin name", "pin\tname",
+                      "pin\nname", "pin\rname", "pin\x1fname", "pin\x7fname", "pin\u00a0name",
+                      "-oProxyCommand=evil", "HostKeyAlias=pin", "pin,other", "pin/other", "$(id)",
+                      "pin;id", "pin`id`", "pin%h", "é", "a" * 254):
+            with self.subTest(alias=repr(alias)), mock.patch.dict(
+                    os.environ, {**self.environment, "LAPKB_PUBLISH_HOST_KEY_ALIAS": alias}, clear=True):
+                with self.assertRaisesRegex(contract.ContractError, "LAPKB_PUBLISH_HOST_KEY_ALIAS is invalid"):
+                    publish_artifact._ssh_command()
+        # NUL cannot be put in a process environment; exercise the same validator directly.
+        with self.assertRaisesRegex(contract.ContractError, "LAPKB_PUBLISH_HOST_KEY_ALIAS is invalid"):
+            publish_artifact._valid_host("pin\x00name", "LAPKB_PUBLISH_HOST_KEY_ALIAS")
 
     def test_publish_validates_shared_contract_before_sending_and_verifies_served_result(self):
         files = {name: self.bundle_dir / name for name in self.bundle}
@@ -206,15 +253,85 @@ class LocalPublisherTests(unittest.TestCase):
                 publish_artifact.publish("launcher", "stable", self.bundle_dir, verifier=VERIFIER)
         run_remote.assert_not_called()
 
-    def test_forced_command_rejects_alternate_commands_without_executing_anything(self):
-        script = ROOT / "host" / "publish-forced-command.sh"
-        self.assertEqual(subprocess.run(["/bin/sh", "-n", str(script)], check=False).returncode, 0)
-        env = {"SSH_ORIGINAL_COMMAND": "python3 /home/siel/bin/publish_remote.py --receive-v1 --root /tmp/attacker"}
-        result = subprocess.run(["/bin/sh", str(script)], env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.assertEqual(result.returncode, 64)
-        self.assertIn("unexpected command", result.stderr)
-        self.assertNotIn("attacker", result.stderr)
+    def test_forced_command_runs_the_maintained_receiver_with_a_real_signed_frame(self):
+        # Fixed-path fixtures are confined to the existing credential-free Docker CI layer.
+        self.assertEqual(os.environ.get("LAPKB_PUBLISHER_ISOLATED_CI"), "1")
+        self.assertEqual(sys.platform, "linux")
+        self.assertEqual(os.geteuid(), 0)
+        self.assertEqual(ROOT, Path("/workspace"))
+        self.assertEqual(os.environ.get("HOME"), "/tmp/publisher-jobs2/home")
+        self.assertEqual(os.environ.get("CARGO_NET_OFFLINE"), "true")
+        policy, raw_policy = make_trust(self.public_root, self.signer.public_key,
+                                       self.signer.key_id, windows_only=True)
+        bundle = make_bundle(self.signer, policy, app="checkerboard", coverage="windows-x64")
+        self._write_bundle(bundle)
+        self.config.write_bytes(canonical(raw_policy))
+        files = {name: self.bundle_dir / name for name in bundle}
+        release = contract.validate_release("checkerboard", "stable", files, policy,
+                                            verifier=VERIFIER, scratch=self.bundle_dir)
+        receiver_home = Path("/home/siel")
+        config_dir = Path("/etc/lapkb")
+        verifier = contract.VERIFIER_PATH
+        for path in (receiver_home, config_dir, verifier):
+            self.assertFalse(os.path.lexists(path), f"refusing an existing fixed-path fixture: {path}")
+        with contextlib.ExitStack() as cleanup:
+            for directory in (receiver_home, receiver_home / "bin", config_dir):
+                directory.mkdir(mode=0o700)
+                cleanup.callback(directory.rmdir)
+            if not os.path.lexists(verifier.parent):
+                verifier.parent.mkdir(mode=0o755)
+                cleanup.callback(verifier.parent.rmdir)
+            self.assertEqual(verifier.parent.resolve(strict=True), verifier.parent)
+            for source, destination, mode in (
+                (ROOT / "host/publish_remote.py", receiver_home / "bin/publish_remote.py", 0o600),
+                (ROOT / "host/release_contract.py", receiver_home / "bin/release_contract.py", 0o600),
+                (self.config, contract.CONFIG_PATH, 0o600), (VERIFIER, verifier, 0o755),
+            ):
+                with destination.open("xb") as output:
+                    cleanup.callback(destination.unlink)
+                    with source.open("rb") as input_file:
+                        shutil.copyfileobj(input_file, output)
+                os.chmod(destination, mode)
+            environment = {**self.environment, "PYTHONDONTWRITEBYTECODE": "1"}
+            with mock.patch.dict(os.environ, environment, clear=True):
+                # No patched receiver/client function or fabricated successful response.
+                os.environ["SSH_ORIGINAL_COMMAND"] = publish_artifact._ssh_command()[-1]
+                for status in ("published", "identical-retry"):
+                    result = publish_artifact._run_remote(
+                        ["/bin/sh", str(ROOT / "host/publish-forced-command.sh"), "ignored-caller-argument"],
+                        "checkerboard", "stable", files,
+                    )
+                    contract.validate_publication_result(result, policy, release)
+                    self.assertEqual(result["status"], status)
+            for name, data in bundle.items():
+                self.assertEqual((self.public_root / "downloads/checkerboard/stable" / name).read_bytes(), data)
+            self.assertTrue((self.public_root / ".lapkb-publisher/state.json").is_file())
+            self.assertFalse((self.public_root / ".lapkb-publisher/journal.json").exists())
+
+    def test_forced_command_rejects_every_other_command_without_execution(self):
+        script = ROOT / "host/publish-forced-command.sh"
+        marker = self.public_root.parent / "unexpected-execution"
+        fixed = publish_artifact.REMOTE_COMMAND
+        commands = (
+            None, "", "id", fixed.replace("python3", "/usr/bin/python3", 1),
+            fixed.replace("--receive-v1", "--receive-v2"), fixed + " --root /tmp/attacker",
+            fixed + " extra", fixed + " ", " " + fixed, fixed + "\n", fixed.replace(" ", "  ", 1),
+            "python3 /home/siel/bin/publish_remote.py /home/siel/public launcher stable",
+            "python3 /home/siel/bin/publish_remote.py /home/siel/public papir stable papir",
+            "python3 /home/siel/bin/publish_remote.py --initialize-history-v1 --inventory /tmp/input --sha256 " + "0" * 64,
+            "python3 /home/siel/bin/publish_remote.py --recover-v1",
+            fixed + f"; touch {marker}", fixed + f" $(touch {marker})", fixed + f" `touch {marker}`",
+            fixed + f"\ntouch {marker}", "'" + fixed + "'",
+        )
+        for command in commands:
+            environment = {} if command is None else {"SSH_ORIGINAL_COMMAND": command}
+            with self.subTest(command=command):
+                result = subprocess.run(["/bin/sh", str(script), "ignored-caller-argument"], env=environment,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                self.assertEqual(result.returncode, 64)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "restricted publisher: unexpected command\n")
+                self.assertFalse(marker.exists())
 
     def test_bundle_and_served_http_redirects_are_rejected(self):
         link = self.public_root.parent / "bundle-link"
@@ -263,14 +380,6 @@ class LocalPublisherTests(unittest.TestCase):
             with mock.patch.object(publish_artifact, "_fetch_exact", side_effect=corrupt_feed):
                 with self.assertRaisesRegex(contract.ContractError, "fixed coverage feed"):
                     publish_artifact._verify_served(self.policy, release, response)
-
-    def test_forced_receiver_never_exposes_local_history_initialization(self):
-        script = ROOT / "host/publish-forced-command.sh"
-        command = "python3 /home/siel/bin/publish_remote.py --initialize-history-v1 --inventory /tmp/input --sha256 " + "0" * 64
-        result = subprocess.run(["/bin/sh", str(script)], env={"SSH_ORIGINAL_COMMAND": command},
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.assertEqual(result.returncode, 64)
-        self.assertIn("unexpected command", result.stderr)
 
     def test_remote_frame_is_bounded_and_ssh_command_is_exact(self):
         files = {name: self.bundle_dir / name for name in self.bundle}
