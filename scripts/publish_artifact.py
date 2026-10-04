@@ -373,7 +373,11 @@ def main():
     parser.add_argument("--bundle-dir", required=True)
     args = parser.parse_args()
     try:
-        publish(args.app, args.channel, args.bundle_dir)
+        verifier = contract.VERIFIER_PATH
+        configured_verifier = os.environ.get("LAPKB_PUBLISHER_VERIFIER")
+        if configured_verifier is not None:
+            verifier = _owned_regular_file(configured_verifier, private=True)
+        publish(args.app, args.channel, args.bundle_dir, verifier=verifier)
     except (ContractError, OSError) as error:
         print(f"publisher failed: {error}", file=sys.stderr)
         return 1

@@ -172,6 +172,13 @@ host token (letters, digits, dots and hyphens, starting with a letter or digit).
 Leaving it unset uses the destination host normally; empty/whitespace/options are
 rejected. This does not add a key/pin or enable SSH config, proxies or agents.
 
+The default verifier remains `/usr/local/libexec/lapkb-release-verifier`.
+A workstation without access to that installation directory can explicitly set
+`LAPKB_PUBLISHER_VERIFIER` to its already-custodied compatible native verifier.
+The override must be an absolute, owned, single-link private regular file with
+safe no-follow ancestors; the same signature checks still apply. The origin
+always uses its own fixed native verifier, never this workstation path.
+
 ```text
 python3 scripts/publish_artifact.py --app <approved-app> --channel stable \
   --bundle-dir <complete-reviewed-current-source-bundle>
@@ -186,10 +193,13 @@ cannot initialize history or change trust.
 
 ## CI evidence and deferred work
 
-The existing validation workflow uses the approved Default self-hosted Linux X64
-group, a private identity-bound jobs2 directory, already approved pinned Node/
-Rust tool images, locked credential-free dependency preparation, and networkless
-publisher tests. Identity-confined cleanup reuses the maintained approved helper.
+The existing validation workflow defaults to the approved Default self-hosted
+Linux X64 group. Its manual `runner_arch` choice can select native Linux ARM64
+on the existing `rust` group; it does not create capacity or change runner grants.
+The same job exports its locked release verifier and SHA-256 alongside its exact
+source/run/attempt and native-architecture check receipt. It retains a private
+identity-bound jobs2 directory, already approved pinned Node/Rust tool images,
+locked credential-free dependency preparation, and networkless publisher tests. Identity-confined cleanup reuses the maintained approved helper.
 `npm test` validates schemas/catalogs and structural schema regressions;
 `scripts/test-publisher.sh` builds/tests the locked verifier and exercises real
 synthetic-signature publisher/client/pickup, mixed-history, conflict/retry,

@@ -18,7 +18,7 @@ jobs:
   validate:
     if: github.repository == 'LAPKB/desktop-releases' && github.ref == 'refs/heads/launcher'
     runs-on:
-      group: Default
+      group: ${{ inputs.runner_arch == 'ARM64' && 'rust' || 'Default' }}
       labels: [self-hosted, Linux, "${{ inputs.runner_arch || 'X64' }}"]
     timeout-minutes: 45
     env:
