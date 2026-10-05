@@ -90,7 +90,7 @@
       "allOf": [{"$ref": "#/$defs/appBase"}, {
         "type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.launcher"}, "channels": {"$ref": "#/$defs/channelPolicies"}},
         "allOf": [{
-          "if": {"required": ["retainedManualRecords"]},
+          "if": {"required": ["retainedManualRecords"], "properties": {"retainedManualRecords": {"$ref": "#/$defs/appBase/properties/retainedManualRecords"}}},
           "then": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"const": ["launcher-desktop"]}, "channels": {"$ref": "#/$defs/signed-channels"}}}
         }, {
           "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"type": "array", "contains": {"const": "launcher-desktop"}}}},
@@ -104,7 +104,7 @@
     "app-checkerboard": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.checkmate"}, "executable": {"const": "checkmate-desktop"}, "channels": {"$ref": "#/$defs/signed-channels"}, "retainedManualRecords": false, "allowedCoverages": {"type": "array", "items": {"enum": ["full-six", "windows-x64"]}}}}]},
     "launcher-desktop-channels": {
       "type": "object", "additionalProperties": false, "required": ["stable"],
-      "properties": {"stable": {"allOf": [{"$ref": "#/$defs/signed-channel"}, {"properties": {"profiles": {
+      "properties": {"stable": {"allOf": [{"$ref": "#/$defs/signed-channel"}, {"type": "object", "properties": {"profiles": {
         "type": "object", "additionalProperties": false, "required": ["darwin-aarch64", "windows-x86_64"],
         "properties": {"darwin-aarch64": {"allOf": [{"$ref": "#/$defs/profileList"}, {
           "type": "array", "maxItems": 3,
