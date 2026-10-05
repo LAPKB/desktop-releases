@@ -95,6 +95,45 @@ test("manual Launcher is explicitly installer/checksum only, never an unsigned p
   const falseSignature = structuredClone(manualReceipt);
   falseSignature.targets["windows-x86_64"].installerSignature = "NOT-A-SIGNATURE";
   rejects("release-receipt", falseSignature);
+  rejects("build-attestation", { ...manualAttestation, version: "0.1.11" });
+  rejects("release-receipt", { ...manualReceipt, version: "0.1.11" });
+});
+
+test("signed Launcher bootstrap is exactly two targets with actual per-target provenance", () => {
+  const version = "0.1.11";
+  const name = `launcher-${version}-windows-x86_64-${hash}.exe`;
+  const tarName = `launcher-${version}-darwin-aarch64-${hash}.app.tar.gz`;
+  const launcherIdentity = { ...identity, bundleIdentifier: "org.lapkb.launcher", displayName: "LAPKB Launcher", executable: "lapkb-launcher", version };
+  const launcherPayload = { ...windowsPayload, productName: "LAPKB Launcher", executable: "lapkb-launcher.exe", version, files: [{ path: "lapkb-launcher.exe", size: 10, sha256: hash }] };
+  const launcherSource = { ...source, repository: "LAPKB/Launcher", branch: "launcher-authorization-repair-20261002", tag: `publish-launcher-stable-${version}` };
+  const windowsArtifact = { ...artifact, name };
+  const macArtifact = { ...artifact, name: tarName, kind: "app-tar-gz" };
+  const two = { ...attestation, app: "launcher", version, coverage: "launcher-desktop", source: launcherSource, targets: {
+    "windows-x86_64": { packageIdentity: launcherIdentity, artifacts: [windowsArtifact], build, windowsPayload: launcherPayload },
+    "darwin-aarch64": { packageIdentity: { ...launcherIdentity, architecture: "aarch64" }, artifacts: [macArtifact], build },
+  } };
+  const { updaterSignature: _windowsSignature, ...windowsReceiptArtifact } = windowsArtifact;
+  const { updaterSignature: _macSignature, ...macReceiptArtifact } = macArtifact;
+  const twoReceipt = { ...receipt, app: "launcher", version, coverage: "launcher-desktop", feed: "latest.json", source: launcherSource, targets: {
+    "windows-x86_64": { ...two.targets["windows-x86_64"], artifacts: [windowsReceiptArtifact], roles: { installer: [name], updater: name }, installerSignature: artifact.updaterSignature },
+    "darwin-aarch64": { ...two.targets["darwin-aarch64"], artifacts: [macReceiptArtifact], roles: { installer: [tarName], updater: tarName } },
+  } };
+  accepts("build-attestation", two);
+  accepts("release-receipt", twoReceipt);
+  for (const schema of ["build-attestation", "release-receipt"]) {
+    const original = schema === "build-attestation" ? two : twoReceipt;
+    for (const change of [
+      (v) => { delete v.targets["darwin-aarch64"]; },
+      (v) => { v.targets["linux-x86_64"] = v.targets["windows-x86_64"]; },
+      (v) => { delete v.targets["darwin-aarch64"].build; },
+      (v) => { v.targets["darwin-aarch64"].build.profile = "development"; },
+      (v) => { v.targets["darwin-aarch64"].artifacts[0].size = 134217729; },
+      (v) => { v.signatureKeyId = null; v.distribution = "manual-checksum"; },
+      (v) => { v.app = "papir"; },
+    ]) {
+      const changed = structuredClone(original); change(changed); rejects(schema, changed);
+    }
+  }
 });
 
 test("full-six still requires six targets, with no Windows-only payload relabeling", () => {
@@ -124,6 +163,24 @@ test("publisher trust permits only configured known channels and explicit Window
   }
   const trust = { schema: "lapkb-publisher-trust-v1", root: "/private/public", origin: "https://downloads.example.test", pickupRepository: "LAPKB/desktop-releases", checkmateMinimumVersion: "0.8.0", apps, legacyAliases };
   accepts("publisher-trust", trust);
+  const desktop = structuredClone(trust);
+  desktop.apps.launcher.allowedCoverages = ["launcher-desktop"];
+  desktop.apps.launcher.retainedManualRecords = { "0.1.9": hash };
+  desktop.apps.launcher.channels.stable = { publicKey: "STRUCTURAL-ONLY-PUBLIC-KEY", keyId: "0123456789ABCDEF", profiles: {
+    "windows-x86_64": [{ id: "nsis", extension: "exe", kind: "nsis", roles: ["installer", "updater"], required: true }],
+    "darwin-aarch64": [{ id: "app-tar", extension: "app.tar.gz", kind: "app-tar-gz", roles: ["installer", "updater"], required: true }],
+  } };
+  accepts("publisher-trust", desktop);
+  for (const change of [
+    (v) => { v.apps.launcher.retainedManualRecords["0.1.11"] = hash; },
+    (v) => { v.apps.papir.retainedManualRecords = { "0.1.9": hash }; },
+    (v) => { v.apps.launcher.allowedCoverages.push("windows-x64"); },
+    (v) => { v.apps.launcher.channels.stable.profiles["darwin-aarch64"][0].extension = "app.zip"; },
+    (v) => { v.apps.launcher.channels.stable.profiles["darwin-aarch64"][0].required = false; },
+    (v) => { v.apps.launcher.channels.stable.publicKey = null; },
+  ]) {
+    const malformed = structuredClone(desktop); change(malformed); rejects("publisher-trust", malformed);
+  }
   const disabled = structuredClone(trust);
   disabled.apps.papir.channels.nightly = disabled.apps.papir.channels.stable;
   rejects("publisher-trust", disabled);

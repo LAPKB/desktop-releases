@@ -656,6 +656,9 @@ def _scope_key(record):
 
 
 def _validate_scope(record, policy):
+    # Only a protected hash of a complete retained record can select old manual
+    # trust. Upload/transaction identities are not complete history records.
+    policy = contract.retained_policy(policy, record)
     try:
         coverage = record["coverage"]
         if (record["feed"] != contract.feed_for_coverage(coverage)
@@ -954,6 +957,7 @@ def _validate_state(data, policy):
         if record["versionTuple"] != list(version_tuple) or any(type(x) is not int for x in record["versionTuple"]):
             raise PublicationError("publisher history version tuple is invalid")
         _validate_scope(record, policy)
+        record_policy = contract.retained_policy(policy, record)
         key = _history_sort(record)
         if key in seen or (prev is not None and key <= prev):
             raise PublicationError("publisher history ordering or uniqueness is invalid")
@@ -989,7 +993,7 @@ def _validate_state(data, policy):
         receipt = record["receipt"]
         receipt_fields = {"schema", "app", "channel", "version", "source",
                           "buildAttestationSha256", "manifestSha256", "signatureKeyId", "targets"}
-        if record["coverage"] == "windows-x64":
+        if record["coverage"] in ("windows-x64", "launcher-desktop"):
             receipt_fields.update(("coverage", "feed"))
         if record["distribution"] == "manual-checksum":
             receipt_fields.add("distribution")
@@ -1000,7 +1004,7 @@ def _validate_state(data, policy):
                 or receipt["source"] != record["source"]
                 or receipt["buildAttestationSha256"] != record["buildAttestationSha256"]
                 or receipt["manifestSha256"] != record["manifestSha256"]
-                or receipt["signatureKeyId"] != policy.apps[app]["channels"][channel]["keyId"]):
+                or receipt["signatureKeyId"] != record_policy.apps[app]["channels"][channel]["keyId"]):
             raise PublicationError("publisher history receipt identity is inconsistent")
         for digest_name in ("buildAttestationSha256", "manifestSha256"):
             if (type(receipt[digest_name]) is not str
@@ -1024,20 +1028,25 @@ def _validate_state(data, policy):
         artifacts_seen = set()
         for target, target_record in receipt["targets"].items():
             fields = {"packageIdentity", "roles", "artifacts"}
-            if record["coverage"] == "windows-x64":
+            windows_proof = target == "windows-x86_64" and record["coverage"] in ("windows-x64", "launcher-desktop")
+            if windows_proof:
                 fields.update(("build", "windowsPayload"))
                 if record["distribution"] == "signed":
                     fields.add("installerSignature")
+            elif record["coverage"] == "launcher-desktop":
+                fields.add("build")
             if type(target_record) is not dict or set(target_record) != fields:
                 raise PublicationError("publisher history target record is malformed")
             identity = {"bundleIdentifier": contract.BUNDLE_IDS[app],
-                        "displayName": contract.WINDOWS_PRODUCTS[app] if record["coverage"] == "windows-x64" else contract.DISPLAY_NAMES[app],
+                        "displayName": contract.WINDOWS_PRODUCTS[app] if record["coverage"] in ("windows-x64", "launcher-desktop") else contract.DISPLAY_NAMES[app],
                         "executable": policy.apps[app]["executable"], "architecture": target.split("-")[-1],
                         "version": version}
             if target_record["packageIdentity"] != identity:
                 raise PublicationError("publisher history package identity is inconsistent")
-            if record["coverage"] == "windows-x64":
+            if windows_proof:
                 contract._validate_windows_payload(target_record, app, version, identity["executable"])
+            elif record["coverage"] == "launcher-desktop":
+                contract._validate_build(target_record["build"])
             artifacts = target_record["artifacts"]
             if type(artifacts) is not list or not 1 <= len(artifacts) <= 8:
                 raise PublicationError("publisher history artifact inventory is invalid")
@@ -1048,10 +1057,11 @@ def _validate_state(data, policy):
                 name = artifact["name"]
                 if (type(name) is not str or name in artifacts_seen
                         or type(artifact["size"]) is not int or artifact["size"] < 1
-                        or artifact["size"] > (256 * 1024 * 1024 if record["coverage"] == "windows-x64" else contract.MAX_FILE_BYTES)
+                        or artifact["size"] > (128 * 1024 * 1024 if record["coverage"] == "launcher-desktop"
+                                                else 256 * 1024 * 1024 if record["coverage"] == "windows-x64" else contract.MAX_FILE_BYTES)
                         or type(artifact["sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])):
                     raise PublicationError("publisher history artifact identity/size/hash is invalid")
-                profiles = policy.apps[app]["channels"][channel]["profiles"][target]
+                profiles = record_policy.apps[app]["channels"][channel]["profiles"][target]
                 profile = next((p for p in profiles if name.endswith("." + p["extension"])), None)
                 if (profile is None or profile["id"] in used or artifact["kind"] != profile["kind"]
                         or artifact["roles"] != profile["roles"]
@@ -1072,7 +1082,7 @@ def _validate_state(data, policy):
                     or not installers or target_record["roles"] != {
                         "installer": sorted(installers), "updater": updaters[0] if updaters else None}):
                 raise PublicationError("publisher history installer/updater roles are inconsistent")
-            if record["coverage"] == "windows-x64" and record["distribution"] == "signed":
+            if windows_proof and record["distribution"] == "signed":
                 signature = target_record["installerSignature"]
                 if type(signature) is not str or not 1 <= len(signature) <= 16 * 1024:
                     raise PublicationError("publisher history installer signature is malformed")
@@ -1121,7 +1131,8 @@ def _read_release_from_disk(policy, fs, state_record, verifier=contract.VERIFIER
             size, digest = _hash_at(directory, name)
             if (size, digest) != (item["size"], item["sha256"]):
                 raise PublicationError(f"published asset differs from durable history: {name}")
-        release = contract.validate_release(app, channel, files, policy, verifier=verifier)
+        release = contract.validate_release(app, channel, files,
+            contract.retained_policy(policy, state_record), verifier=verifier)
         if _record_from_release(release) != state_record:
             raise PublicationError("published release does not match its durable history record")
         return release

@@ -539,6 +539,58 @@ finally:
         self.assertNotIn("opaque-old-placeholder", page)
         publisher.recover_publications(self.policy, verifier=VERIFIER)
 
+    def test_launcher_manual_history_transitions_to_signed_two_target_updates(self):
+        self._windows_policy()
+        self._initialize_fixture()
+        versions = {"launcher": "0.1.9", "checkerboard": "0.8.2", "bdautodial": "0.2.4", "bestdose": "1.0.11", "papir": "0.1.5"}
+        for app, version in versions.items():
+            self._publish(app, "stable", make_bundle(self.signer, self.policy, app=app, version=version, coverage="windows-x64"))
+        before = public_snapshot(self.root)
+        state_path = self.root / publisher.STATE_NAME / publisher.STATE_FILE
+        old_state = json.loads(state_path.read_bytes())
+        manual = next(r for r in old_state["history"] if r["app"] == "launcher")
+        old_policy = self.policy
+        updated = copy.deepcopy(self.trust)
+        entry = updated["apps"]["launcher"]
+        entry["allowedCoverages"] = ["launcher-desktop"]
+        entry["retainedManualRecords"] = {"0.1.9": hashlib.sha256(canonical(manual)).hexdigest()}
+        entry["channels"]["stable"] = {"publicKey": self.signer.public_key, "keyId": self.signer.key_id,
+            "profiles": {"windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "required": True, "roles": ["installer", "updater"]}],
+            "darwin-aarch64": [{"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "required": True, "roles": ["installer", "updater"]}]}}
+        self.policy = contract.validate_policy(updated)
+        # Existing exact records/bytes are valid under the new policy without
+        # reinitializing, rewriting, re-signing or changing old null key IDs.
+        publisher.recover_publications(self.policy, verifier=VERIFIER)
+        self.assertEqual(json.loads(state_path.read_bytes()), old_state)
+        self.assertEqual(public_snapshot(self.root), before)
+        changed = copy.deepcopy(old_state)
+        next(r for r in changed["history"] if r["app"] == "launcher")["source"]["commit"] = "b" * 40
+        with self.assertRaises(publisher.PublicationError):
+            publisher._validate_state(canonical(changed), self.policy)
+        new_unsigned = make_bundle(None, old_policy, app="launcher", version="0.1.11", coverage="windows-x64")
+        with self.assertRaises(contract.ContractError):
+            contract.release_mode(self.policy, "launcher", "stable", "windows-x64")
+        with self.assertRaises(contract.ContractError):
+            self._validate("launcher", "stable", new_unsigned)
+        signed = make_bundle(self.signer, self.policy, app="launcher", version="0.1.11", coverage="launcher-desktop")
+        for name in ["build-attestation-0.1.11.json.sig", "release-receipt-0.1.11.json.sig"]:
+            with self.assertRaises(contract.ContractError):
+                self._validate("launcher", "stable", {n: b for n, b in signed.items() if n != name})
+        result = self._publish("launcher", "stable", signed)
+        self.assertEqual(result["targets"], ["darwin-aarch64", "windows-x86_64"])
+        self.assertEqual(result["feed"], "latest.json")
+        after = public_snapshot(self.root)
+        for path, metadata in before.items():
+            if path not in ("downloads/catalog.json", "downloads/index.html", "downloads/launcher/stable/latest.json", "launcher/latest.json"):
+                self.assertEqual(after[path], metadata, path)
+        new_state = json.loads(state_path.read_bytes())
+        self.assertEqual(new_state["historical"], old_state["historical"])
+        self.assertTrue(all(record in new_state["history"] for record in old_state["history"]))
+        self.assertEqual(next(r for r in new_state["history"] if r["app"] == "launcher" and r["version"] == "0.1.9"), manual)
+        feed = json.loads((self.root / "downloads/launcher/stable/latest.json").read_bytes())
+        self.assertEqual(set(feed["platforms"]), {"darwin-aarch64", "windows-x86_64"})
+        publisher.recover_publications(self.policy, verifier=VERIFIER)
+
     def test_manual_launcher_has_no_key_signature_updater_or_unsigned_app_escape(self):
         self._windows_policy()
         manual_policy = self.policy.apps["launcher"]["channels"]["stable"]

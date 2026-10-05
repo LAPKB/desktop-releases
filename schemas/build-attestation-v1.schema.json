@@ -10,7 +10,7 @@
     "app": {"enum": ["launcher", "papir", "bestdose", "bdautodial", "checkerboard"]},
     "channel": {"enum": ["stable", "beta"]},
     "version": {"$ref": "#/$defs/version"},
-    "coverage": {"enum": ["full-six", "windows-x64"]},
+    "coverage": {"enum": ["full-six", "windows-x64", "launcher-desktop"]},
     "distribution": {"const": "manual-checksum"},
     "source": {"$ref": "#/$defs/source"},
     "notes": {"type": "string", "maxLength": 16384},
@@ -32,7 +32,7 @@
       "oneOf": [
         {
           "properties": {
-            "app": {"enum": ["papir", "bestdose", "bdautodial", "checkerboard"]},
+            "app": {"enum": ["launcher", "papir", "bestdose", "bdautodial", "checkerboard"]},
             "distribution": false,
             "targets": {"type": "object", "properties": {"windows-x86_64": {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"$ref": "#/$defs/signed-nsis"}}}}}}
           }
@@ -40,14 +40,24 @@
         {
           "required": ["distribution"],
           "properties": {
-            "app": {"const": "launcher"}, "distribution": {"const": "manual-checksum"},
+            "app": {"const": "launcher"}, "version": {"enum": ["0.1.9", "0.1.10"]}, "distribution": {"const": "manual-checksum"},
             "targets": {"type": "object", "properties": {"windows-x86_64": {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"$ref": "#/$defs/manual-nsis"}}}}}}
           }
         }
       ]
     },
     "else": {
-      "properties": {"distribution": false, "targets": {"$ref": "#/$defs/full-six-targets"}}
+      "if": {"required": ["coverage"], "properties": {"coverage": {"const": "launcher-desktop"}}},
+      "then": {"properties": {
+        "app": {"const": "launcher"}, "channel": {"const": "stable"}, "distribution": false,
+        "source": {"type": "object", "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}},
+        "notes": {"type": "string", "maxLength": 4096}, "targets": {"type": "object", "additionalProperties": false,
+          "required": ["darwin-aarch64", "windows-x86_64"], "properties": {
+            "darwin-aarch64": {"$ref": "#/$defs/launcher-macos-target"},
+            "windows-x86_64": {"allOf": [{"$ref": "#/$defs/windows-target"}, {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/signed-nsis"}, {"type": "object", "properties": {"size": {"type": "integer", "maximum": 134217728}}}]}}}}]}
+          }}
+      }},
+      "else": {"properties": {"distribution": false, "targets": {"$ref": "#/$defs/full-six-targets"}}}
     }
   }],
   "$defs": {
@@ -119,6 +129,16 @@
         "darwin-aarch64": {"$ref": "#/$defs/target-aarch64"}, "darwin-x86_64": {"$ref": "#/$defs/target-x86_64"},
         "windows-aarch64": {"$ref": "#/$defs/target-aarch64"}, "windows-x86_64": {"$ref": "#/$defs/target-x86_64"},
         "linux-aarch64": {"$ref": "#/$defs/target-aarch64"}, "linux-x86_64": {"$ref": "#/$defs/target-x86_64"}
+      }
+    },
+    "launcher-macos-target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "artifacts", "build"],
+      "properties": {
+        "packageIdentity": {"allOf": [{"$ref": "#/$defs/identity"}, {"type": "object", "properties": {"architecture": {"const": "aarch64"}}}]},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"allOf": [{"$ref": "#/$defs/artifact"}, {"type": "object", "properties": {
+          "size": {"type": "integer", "maximum": 134217728}, "updaterSignature": {"anyOf": [{"type": "null"}, {"type": "string", "maxLength": 16384}]}
+        }}]}},
+        "build": {"$ref": "#/$defs/windows-build"}
       }
     },
     "windows-build": {

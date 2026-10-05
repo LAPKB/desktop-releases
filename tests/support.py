@@ -124,7 +124,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
     for target in selected_targets:
         target_identity = {
             "bundleIdentifier": contract.BUNDLE_IDS[app],
-            "displayName": contract.WINDOWS_PRODUCTS[app] if coverage == "windows-x64" else contract.DISPLAY_NAMES[app],
+            "displayName": contract.WINDOWS_PRODUCTS[app] if coverage in ("windows-x64", "launcher-desktop") else contract.DISPLAY_NAMES[app],
             "executable": app_policy["executable"],
             "architecture": target.split("-")[-1],
             "version": version,
@@ -155,7 +155,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
                 updater_name = name
         artifacts.sort(key=lambda item: item["name"])
         targets[target] = {"packageIdentity": target_identity, "artifacts": artifacts}
-        if coverage == "windows-x64":
+        if target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop"):
             executable_bytes = f"synthetic installed executable:{app}:{version}:{nonce}".encode()
             targets[target].update(
                 build={"runId": "12345", "runAttempt": 1, "profile": "public-staging"},
@@ -164,6 +164,8 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
                     "installMode": "currentUser", "files": [{"path": app_policy["executable"] + ".exe",
                         "size": len(executable_bytes), "sha256": hashlib.sha256(executable_bytes).hexdigest()}]},
             )
+        elif coverage == "launcher-desktop":
+            targets[target]["build"] = {"runId": "12345", "runAttempt": 1, "profile": "public-staging"}
 
     attestation = {
         "schema": "lapkb-build-attestation-v1", "app": app, "channel": channel,
@@ -172,7 +174,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
         "pub_date": "2026-09-25T00:00:00Z",
         "targets": targets,
     }
-    if coverage == "windows-x64":
+    if coverage in ("windows-x64", "launcher-desktop"):
         attestation["coverage"] = coverage
     if manual:
         attestation["distribution"] = "manual-checksum"
@@ -227,10 +229,12 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
                 for item in records
             ],
         }
-        if coverage == "windows-x64":
+        if target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop"):
             receipt_targets[target].update(build=targets[target]["build"], windowsPayload=targets[target]["windowsPayload"])
             if not manual:
                 receipt_targets[target]["installerSignature"] = next(item["updaterSignature"] for item in records if "updater" in item["roles"])
+        elif coverage == "launcher-desktop":
+            receipt_targets[target]["build"] = targets[target]["build"]
     receipt = {
         "schema": "release-receipt-v1", "app": app, "channel": channel, "version": version,
         "source": source,
@@ -238,7 +242,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
         "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "signatureKeyId": None if manual else signer.key_id, "targets": receipt_targets,
     }
-    if coverage == "windows-x64":
+    if coverage in ("windows-x64", "launcher-desktop"):
         receipt.update(coverage=coverage, feed=feed)
     if manual:
         receipt["distribution"] = "manual-checksum"

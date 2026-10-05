@@ -5,6 +5,24 @@ genuine SDK Permits, device binding and application authorization are separate.
 This repository publishes release metadata and immutable assets; it does not
 implement another updater, installer worker or authorization service.
 
+## Launcher manual-to-signed transition
+
+From bootstrap 0.1.11 fresh Launcher updates require the dedicated approved
+updater key, artifact signatures and the existing signed attestation/receipt.
+They are not Apple signing or Authenticode. The protected Launcher policy may
+pin `retainedManualRecords`: at most the complete canonical durable record
+hashes for already-published 0.1.9 and 0.1.10. Only a matching retained history
+record restores its old null key and installer-only profile for validation.
+Uploads, plans and fresh releases cannot select that acceptance. Do not reset,
+delete, rewrite, relabel or re-sign history. A separately published 0.1.10 must
+be observed and pinned exactly before activating the signed policy.
+
+All other app trust, assets, feeds, signatures, history and observed Mac archives
+remain unchanged. Reuse the installed native verifier: the signature format did
+not change. Apply the maintained receiver/contract and protected policy only
+after the focused existing CI regressions pass; never replay activation or
+historical initialization.
+
 ## One release contract and writer
 
 The workstation client (`scripts/publish_artifact.py`), forced SSH receiver and
@@ -26,6 +44,12 @@ invitation to invent its key. Aliases must name the same configured channels.
 - `full-six`: exactly Darwin, Windows and Linux, each ARM64 and x64, with
   `latest.json`. All six configured target profiles and updater roles remain
   mandatory for this coverage.
+- `launcher-desktop`: only Launcher stable Mac ARM64 + Windows x64, with an
+  honest two-platform `latest.json`. Mac uses the genuine `.app.tar.gz` updater
+  and its signature; Windows reuses the current-user NSIS EXE. Both targets bind
+  actual CI run/attempt/profile and source. This is not a six-platform release.
+  Only Launcher current catalog links and its canonical feed advance; older
+  manual Windows `latest-windows.json`, assets and receipts remain retained.
 - `windows-x64`: exactly `windows-x86_64`, stable, with
   `latest-windows.json`. Windows-only policy needs only that actual profile, not
   fake beta keys or unavailable six-target packages.
@@ -72,7 +96,8 @@ those claims are signed. A synthetic fixture is never product evidence.
 
 ## Manual Launcher bootstrap
 
-Launcher Windows 0.1.9+ is explicitly manual/checksum-only in the **same** writer.
+Historical Launcher Windows 0.1.9 and optional 0.1.10 use manual/checksum
+records in the **same** writer. Fresh 0.1.11+ updates must be signed.
 Its stable Windows-only channel sets `manualTargets: [windows-x86_64]`,
 `publicKey: null`, `keyId: null`; the one required NSIS profile has only the
 `installer` role. This exception is restricted to Launcher stable Windows x64.
@@ -86,8 +111,9 @@ provenance requirements remain; there are **no** detached signatures,
 `latest-windows.json` identifies `lapkb-manual-download-v1`, Launcher/channel/
 coverage/distribution, and `installers[target] = {url, sha256, size, kind}`.
 It is not a signed Tauri updater feed. The website labels it as manual/checksum
-and makes no signature, Authenticode or self-update claim. Standard Launcher
-self-update remains deferred; no fake updater key is required.
+and makes no signature, Authenticode or self-update claim for those old bytes.
+New signed Launcher bootstrap/update records use the dedicated public trust;
+the historical acceptance never fabricates updater signatures for old installers.
 
 ## Durable history and recovery
 
@@ -221,5 +247,6 @@ native Windows installation or application acceptance. The existing legacy
 `stage-release.yml`, `publish-download.yml` and `publish-smoke.yml` two-file
 interfaces remain **not release-approved** and must not be invoked. No duplicate
 writer or unsigned protected-app bypass was added. Full Deploy automation, Linux
-completion, scientific/oracle work and Launcher self-update remain deferred and
-do not gate the first Windows website release through the reviewed client/core.
+completion and scientific/oracle work remain deferred. The coordinated signed
+Launcher bootstrap uses this same client/core after genuine CI completion; it
+does not re-label or overwrite the first manual Windows release.

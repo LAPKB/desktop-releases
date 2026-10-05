@@ -66,13 +66,19 @@
         "branch": {"type": "string", "minLength": 1, "maxLength": 128},
         "bundleIdentifier": {"type": "string", "minLength": 1, "maxLength": 128},
         "executable": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
-        "allowedCoverages": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["full-six", "windows-x64"]}},
+        "allowedCoverages": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["full-six", "windows-x64", "launcher-desktop"]}},
+        "retainedManualRecords": {"type": "object", "additionalProperties": false, "minProperties": 1, "maxProperties": 2,
+          "properties": {"0.1.9": {"$ref": "build-attestation-v1.schema.json#/$defs/hash"}, "0.1.10": {"$ref": "build-attestation-v1.schema.json#/$defs/hash"}}},
         "channels": {"$ref": "#/$defs/channelPolicies"}
       },
       "allOf": [{
         "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"const": ["windows-x64"]}}},
         "then": {"properties": {"channels": {"$ref": "#/$defs/windows-channels"}}},
-        "else": {"properties": {"channels": {"$ref": "#/$defs/full-six-channels"}}}
+        "else": {
+          "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"type": "array", "contains": {"const": "launcher-desktop"}}}},
+          "then": {"properties": {"channels": {"$ref": "#/$defs/launcher-desktop-channels"}}},
+          "else": {"properties": {"channels": {"$ref": "#/$defs/full-six-channels"}}}
+        }
       }, {
         "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"type": "array", "contains": {"const": "windows-x64"}}}},
         "then": {"properties": {"channels": {"type": "object", "properties": {
@@ -82,18 +88,32 @@
     },
     "app-launcher": {
       "allOf": [{"$ref": "#/$defs/appBase"}, {
-        "type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.launcher"}},
-        "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"type": "array", "contains": {"const": "windows-x64"}}}},
-        "then": {"properties": {"allowedCoverages": {"const": ["windows-x64"]}, "channels": {
-          "type": "object", "additionalProperties": false, "required": ["stable"], "properties": {"stable": {"$ref": "#/$defs/manual-channel"}}
-        }}},
-        "else": {"properties": {"channels": {"$ref": "#/$defs/signed-channels"}}}
+        "type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.launcher"}, "channels": {"$ref": "#/$defs/channelPolicies"}},
+        "allOf": [{
+          "if": {"required": ["retainedManualRecords"]},
+          "then": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"const": ["launcher-desktop"]}, "channels": {"$ref": "#/$defs/signed-channels"}}}
+        }, {
+          "if": {"required": ["allowedCoverages"], "properties": {"allowedCoverages": {"type": "array", "contains": {"const": "launcher-desktop"}}}},
+          "then": {"properties": {"allowedCoverages": {"const": ["launcher-desktop"]}}}
+        }]
       }]
     },
-    "app-papir": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "com.papir.app"}, "channels": {"$ref": "#/$defs/signed-channels"}}}]},
-    "app-bestdose": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.bestdose"}, "channels": {"$ref": "#/$defs/signed-channels"}}}]},
-    "app-bdautodial": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "com.bdautodial.desktop"}, "channels": {"$ref": "#/$defs/signed-channels"}}}]},
-    "app-checkerboard": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.checkmate"}, "executable": {"const": "checkmate-desktop"}, "channels": {"$ref": "#/$defs/signed-channels"}}}]},
+    "app-papir": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "com.papir.app"}, "channels": {"$ref": "#/$defs/signed-channels"}, "retainedManualRecords": false, "allowedCoverages": {"type": "array", "items": {"enum": ["full-six", "windows-x64"]}}}}]},
+    "app-bestdose": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.bestdose"}, "channels": {"$ref": "#/$defs/signed-channels"}, "retainedManualRecords": false, "allowedCoverages": {"type": "array", "items": {"enum": ["full-six", "windows-x64"]}}}}]},
+    "app-bdautodial": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "com.bdautodial.desktop"}, "channels": {"$ref": "#/$defs/signed-channels"}, "retainedManualRecords": false, "allowedCoverages": {"type": "array", "items": {"enum": ["full-six", "windows-x64"]}}}}]},
+    "app-checkerboard": {"allOf": [{"$ref": "#/$defs/appBase"}, {"type": "object", "properties": {"bundleIdentifier": {"const": "org.lapkb.checkmate"}, "executable": {"const": "checkmate-desktop"}, "channels": {"$ref": "#/$defs/signed-channels"}, "retainedManualRecords": false, "allowedCoverages": {"type": "array", "items": {"enum": ["full-six", "windows-x64"]}}}}]},
+    "launcher-desktop-channels": {
+      "type": "object", "additionalProperties": false, "required": ["stable"],
+      "properties": {"stable": {"allOf": [{"$ref": "#/$defs/signed-channel"}, {"properties": {"profiles": {
+        "type": "object", "additionalProperties": false, "required": ["darwin-aarch64", "windows-x86_64"],
+        "properties": {"darwin-aarch64": {"allOf": [{"$ref": "#/$defs/profileList"}, {
+          "type": "array", "maxItems": 3,
+          "contains": {"type": "object", "properties": {"roles": {"type": "array", "contains": {"const": "updater"}}}}, "minContains": 1, "maxContains": 1,
+          "items": {"type": "object", "if": {"properties": {"roles": {"type": "array", "contains": {"const": "updater"}}}},
+            "then": {"properties": {"extension": {"const": "app.tar.gz"}, "kind": {"const": "app-tar-gz"}, "required": {"const": true}}}}
+        }]}, "windows-x86_64": {"$ref": "#/$defs/signed-nsis-profiles"}}
+      }}}]}}
+    },
     "windows-channels": {
       "type": "object", "properties": {"stable": {"$ref": "#/$defs/windows-profiles-channel"}, "beta": {"$ref": "#/$defs/windows-profiles-channel"}}
     },
