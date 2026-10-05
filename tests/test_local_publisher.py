@@ -351,8 +351,9 @@ class LocalPublisherTests(unittest.TestCase):
 
     def test_windows_served_verification_binds_fixed_feed_and_complete_response_identity(self):
         self.policy, _ = make_trust(self.public_root, self.signer.public_key, self.signer.key_id, windows_only=True)
-        for app in ("papir", "launcher"):
-            bundle = make_bundle(self.signer, self.policy, app=app, coverage="windows-x64")
+        # The manual Launcher case is the historical 0.1.9 feed.
+        for app, version in (("papir", "1.2.3"), ("launcher", "0.1.9")):
+            bundle = make_bundle(self.signer, self.policy, app=app, version=version, coverage="windows-x64")
             self._write_bundle(bundle)
             release = contract.validate_release(app, "stable", {name: self.bundle_dir / name for name in bundle},
                                                 self.policy, verifier=VERIFIER, scratch=self.bundle_dir)

@@ -207,15 +207,16 @@ class PickupTests(unittest.TestCase):
 
     def test_windows_scope_identity_and_processed_state_deny_feed_coverage_or_disabled_channel(self):
         self.policy, _ = make_trust(self.root, self.signer.public_key, self.signer.key_id, windows_only=True)
-        for app in ("papir", "launcher"):
-            bundle = make_bundle(self.signer, self.policy, app=app, coverage="windows-x64")
+        # The manual Launcher case is the historical 0.1.9 feed.
+        for app, version in (("papir", "1.2.3"), ("launcher", "0.1.9")):
+            bundle = make_bundle(self.signer, self.policy, app=app, version=version, coverage="windows-x64")
             assets = [{"id": index, "name": name, "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
                       for index, (name, data) in enumerate(sorted(bundle.items()), 1)]
-            identity = pickup._release_identity({"id": 7, "draft": False, "prerelease": False}, app, "stable", "1.2.3", assets, self.policy)
+            identity = pickup._release_identity({"id": 7, "draft": False, "prerelease": False}, app, "stable", version, assets, self.policy)
             self.assertEqual(identity["feed"], "latest-windows.json")
             self.assertEqual(identity["targets"], ["windows-x86_64"])
             self.assertEqual(identity["distribution"], "manual-checksum" if app == "launcher" else "signed")
-            tag = f"publish-{app}-stable-1.2.3"
+            tag = f"publish-{app}-stable-{version}"
             state_dir = self.root.parent / ("pickup-state-" + app)
             state_dir.mkdir(mode=0o700)
             state_path = state_dir / "pickup-state.json"
@@ -237,12 +238,12 @@ class PickupTests(unittest.TestCase):
             with self.assertRaisesRegex(contract.ContractError, "exactly one fixed"):
                 pickup._asset_scope(self.policy, app, "stable", confused)
 
-    def test_signed_windows_and_manual_launcher_pickup_use_the_same_real_core_then_idle(self):
+    def test_signed_windows_and_legacy_manual_launcher_pickup_use_the_same_real_core_then_idle(self):
         self.policy, _ = make_trust(self.root, self.signer.public_key, self.signer.key_id, windows_only=True)
         original_publish, original_recover = publish_remote.publish_files, publish_remote.recover_publications
-        for app in ("papir", "launcher"):
-            bundle = make_bundle(self.signer, self.policy, app=app, coverage="windows-x64")
-            tag = f"publish-{app}-stable-1.2.3"
+        for app, version in (("papir", "1.2.3"), ("launcher", "0.1.9")):
+            bundle = make_bundle(self.signer, self.policy, app=app, version=version, coverage="windows-x64")
+            tag = f"publish-{app}-stable-{version}"
             home = self.root.parent / ("private-pickup-" + app)
             config_dir, state_dir = home / ".config/lapkb", home / ".local/state/lapkb"
             config_dir.mkdir(mode=0o700, parents=True)

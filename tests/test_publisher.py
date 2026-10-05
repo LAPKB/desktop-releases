@@ -609,6 +609,11 @@ finally:
             self.assertNotIn("platforms", json.loads(release["manifestBytes"]))
         finally:
             publisher.remove_staging(self.policy, name)
+        for version in ("0.1.11", "1.2.3"):
+            unsigned = make_bundle(None, self.policy, app="launcher", version=version, coverage="windows-x64")
+            with self.subTest(version=version), self.assertRaisesRegex(
+                    contract.ContractError, "new Launcher updates require signed bootstrap trust"):
+                self._validate("launcher", "stable", unsigned)
         for app in ("papir", "checkerboard", "bdautodial", "bestdose"):
             signed = make_bundle(self.signer, self.policy, app=app, coverage="windows-x64")
             unsigned = {key: value for key, value in signed.items() if not key.endswith(".sig")}
