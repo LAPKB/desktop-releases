@@ -16,7 +16,8 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y build-essential ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 700 "$HOME" \
-    && chmod 700 /tmp/publisher-jobs2 "$CARGO_HOME" "$RUSTUP_HOME"
+    && chmod 700 /tmp/publisher-jobs2 "$CARGO_HOME" "$RUSTUP_HOME" \
+    && rustup component add rustfmt --toolchain 1.89.0
 WORKDIR /workspace
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
