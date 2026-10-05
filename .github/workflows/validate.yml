@@ -168,6 +168,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           test "$RUNNER_ARCH" = "$PUBLISHER_ARCH"
           case "$PUBLISHER_ARCH" in
             X64) platform=linux/amd64 ;;
@@ -175,7 +176,68 @@ jobs:
             *) exit 1 ;;
           esac
           python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
-          docker buildx build --platform "$platform" --file "$JOB_DIRECTORY/source/scripts/ci/publisher.Dockerfile" \
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG BUILDX_CONFIG BUILDX_BUILDER BUILDKIT_HOST \
+            DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_AUTH_CONFIG SSH_AUTH_SOCK
+          private_config="$JOB_DIRECTORY/docker"
+          docker_mode=''
+          docker_argv=()
+          builder=''
+          builder_creation_started=0
+
+          cleanup_docker() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            if ! python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY" root-or-runner; then
+              echo 'Refusing Docker cleanup outside the identity-validated private job' >&2
+              if [[ "$status" == 0 ]]; then status=1; fi
+              exit "$status"
+            fi
+            if [[ "$builder_creation_started" == 1 ]]; then
+              if ! "${docker_argv[@]}" buildx rm --force "$builder" >/dev/null; then
+                printf "Could not remove this job's Buildx builder/cache: %s\n" "$builder" >&2
+                if [[ "$status" == 0 ]]; then status=1; fi
+              fi
+            fi
+            if [[ "$docker_mode" == sudo ]]; then
+              # Restore only root-owned entries here, including partial failed exports.
+              if ! python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY" root-or-runner \
+                || ! sudo -n -- /usr/bin/chown -R --no-dereference --from=0 "$runner_uid:$runner_gid" -- "$JOB_DIRECTORY"; then
+                echo 'Scoped ownership restoration failed for this private job' >&2
+                if [[ "$status" == 0 ]]; then status=1; fi
+              fi
+            fi
+            if ! python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"; then
+              echo 'Private job did not return to validated runner ownership' >&2
+              if [[ "$status" == 0 ]]; then status=1; fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_docker EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          # Buildx defaults to this private Docker config's buildx child, even under sudo.
+          mkdir -m 700 "$private_config" "$private_config/buildx"
+          random_suffix="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+          [[ "$random_suffix" =~ ^[0-9a-f]{32}$ ]]
+          builder="publisher-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${random_suffix}"
+          docker_flags=(--host unix:///var/run/docker.sock --config "$private_config")
+          direct_docker_argv=(/usr/bin/docker "${docker_flags[@]}")
+          if "${direct_docker_argv[@]}" version >/dev/null 2>&1; then
+            docker_argv=("${direct_docker_argv[@]}")
+            docker_mode=direct
+          else
+            docker_argv=(sudo -n -- /usr/bin/docker "${docker_flags[@]}")
+            docker_mode=sudo
+          fi
+          builder_creation_started=1
+          "${docker_argv[@]}" buildx create --name "$builder" --driver docker-container >/dev/null
+          "${docker_argv[@]}" buildx inspect "$builder" --bootstrap >/dev/null
+          "${docker_argv[@]}" buildx build --builder "$builder" --platform "$platform" --file "$JOB_DIRECTORY/source/scripts/ci/publisher.Dockerfile" \
             --target ci-evidence --build-arg PUBLISHER_SOURCE_SHA="$GITHUB_SHA" \
             --build-arg PUBLISHER_RUN_ID="$GITHUB_RUN_ID" --build-arg PUBLISHER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             --output "type=local,dest=$JOB_DIRECTORY/evidence" --progress plain "$JOB_DIRECTORY/source"
