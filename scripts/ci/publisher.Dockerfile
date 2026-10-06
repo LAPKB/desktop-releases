@@ -29,6 +29,8 @@ COPY scripts/ ./scripts/
 COPY schemas/ ./schemas/
 COPY channels/ ./channels/
 COPY tests/ ./tests/
+# The coordinator scheduling regression checks the actual release job graph.
+COPY .github/workflows/publish-download.yml ./.github/workflows/publish-download.yml
 ARG PUBLISHER_SOURCE_SHA
 ARG PUBLISHER_RUN_ID
 ARG PUBLISHER_RUN_ATTEMPT

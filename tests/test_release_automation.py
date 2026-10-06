@@ -12,12 +12,14 @@ import email.message
 import hashlib
 import io
 import json
+import re
 import stat
 import sys
 import tempfile
 import unittest
 import urllib.error
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -40,7 +42,7 @@ def fixture_plan(app="papir"):
             "branch": product["integration"], "source": "a" * 40, "version": "2.3.4",
             "workflowId": 81, "request": "desktop-100-1-" + "f" * 32,
             "publisherRun": 100, "publisherAttempt": 1, "publisherSource": "b" * 40,
-            "publisherBranch": "launcher", "producerRun": 12345}
+            "publisherBranch": "launcher", "producerRun": 12345, "producerAttempt": 1}
 
 
 def fixture_run(plan):
@@ -48,12 +50,12 @@ def fixture_run(plan):
             "head_sha": plan["source"], "display_title": "desktop-release " + plan["request"],
             "workflow_id": plan["workflowId"], "path": ".github/workflows/" + github.PRODUCTS[plan["app"]]["workflow"],
             "repository": {"full_name": plan["repository"]}, "head_repository": {"full_name": plan["repository"]},
-            "run_attempt": 1, "status": "completed", "conclusion": "success"}
+            "run_attempt": github.producer_attempt(plan), "status": "completed", "conclusion": "success"}
 
 
 def fixture_jobs(plan):
     return [{"id": n + 1, "name": github.PRODUCTS[plan["app"]]["jobs"][target][1],
-             "run_id": plan["producerRun"], "run_attempt": 1, "head_sha": plan["source"],
+             "run_id": plan["producerRun"], "run_attempt": github.producer_attempt(plan), "head_sha": plan["source"],
              "status": "completed", "conclusion": "success", "steps": [
                  {"name": name, "status": "completed", "conclusion": "success"}
                  for name in github.CHECKS[plan["app"]][target]]}
@@ -68,13 +70,101 @@ def fixture_artifacts(plan):
             for n, target in enumerate(github.TARGETS)]
 
 
+def fixture_source_plan():
+    plan = fixture_plan()
+    paths = ("package.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "package-lock.json")
+    plan.update(declarations={"fixture": "2.3.4"}, sourceFiles={p: hashlib.sha256(b"fixture").hexdigest() for p in paths}, producerInputs={"signing_kid": "existing-public-kid", "signing_public_key": "existing-public-key"})
+    return plan
+
+
+def fixture_publisher_artifact(plan, kind="intent", artifact_id=8):
+    return {"id": artifact_id, "name": desktop.artifact_name(kind, plan), "workflow_run": {"id": plan["publisherRun"]}}
+
+
+@contextmanager
+def fixture_planning(workspace, records, runs, *, attempt=2, correlated=None, branch_source=None):
+    """Only planning I/O is mocked; retry/source/run validation stays real."""
+    old = records[0][0]
+    api, own = mock.Mock(), mock.Mock()
+    own.pages.return_value = [a for _, a in records]
+    api.pages.return_value = list(runs.values()) if correlated is None else correlated
+    def response(path):
+        if "/git/ref/" in path:
+            return {"ref": "refs/heads/" + old["branch"], "object": {"type": "commit", "sha": branch_source or old["source"]}}
+        if "/actions/runs/" in path:
+            return runs[int(path.split("/runs/")[1].split("/")[0])]
+        if "/actions/workflows/" in path:
+            return {"id": 81, "path": ".github/workflows/tauri.yml", "state": "active"}
+        return {"full_name": old["repository"], "id": 7}
+    api.request.side_effect = response
+    def contents(_api, _repo, source, path):
+        if source != old["source"]:
+            raise AssertionError("Planning changed the frozen source")
+        return b"release_request: desktop_release: source_sha:" if path.endswith(".yml") else b"lapkb-actions-candidate-v1" if path.endswith(".py") else b"fixture"
+    def retained(_own, artifact, mode, kind, _workspace):
+        return next(p for p, a in records if a["id"] == artifact["id"]), workspace
+    env = {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": str(attempt), "GITHUB_SHA": "b" * 40,
+           "RELEASE_PAPIR_SIGNING_KID": "existing-public-kid", "RELEASE_PAPIR_SIGNING_PUBLIC_KEY": "existing-public-key"}
+    with mock.patch.dict(desktop.os.environ, env), mock.patch.object(desktop, "publisher_guard", return_value="launcher"), mock.patch.object(desktop, "app_api", return_value=api), mock.patch.object(desktop, "GitHub", return_value=own), mock.patch.object(desktop, "content", side_effect=contents), mock.patch.object(desktop, "derive_version", return_value=("2.3.4", old["declarations"])), mock.patch.object(desktop, "publisher_artifact", side_effect=retained):
+        yield api
+
+
+class CoordinatorSourceTests(unittest.TestCase):
+    def test_one_x64_producer_worker_is_not_reserved_by_waiting_coordinator(self):
+        source = (ROOT / ".github/workflows/publish-download.yml").read_text()
+        jobs = dict(re.findall(r"^  (\w+):\n(.*?)(?=^  \w+:\n|\Z)", source, re.M | re.S))
+        def lane(name):
+            block = jobs[name]
+            group = re.search(r"^      group: (\w+)$", block, re.M).group(1)
+            labels = re.search(r"^      labels: \[self-hosted, Linux, (\w+)\]$", block, re.M).group(1)
+            return group, labels
+        self.assertEqual(lane("build"), ("rust", "ARM64"))
+        for name in ("plan", "authorize", "release"):
+            self.assertEqual(lane(name), ("Default", "X64"))
+        self.assertIn("needs: [plan, authorize]", jobs["build"])
+        self.assertIn("needs: [plan, authorize, build]", jobs["release"])
+        # One worker per lane: plan/authorize finish before the coordinator waits;
+        # publication cannot start until its child builds have finished.
+        occupied_during_wait = {lane("build")}
+        producer_lane = ("Default", "X64")
+        def worker_available(requested, occupied):
+            return requested not in occupied
+        self.assertTrue(worker_available(producer_lane, occupied_during_wait))
+        self.assertFalse(worker_available(producer_lane, {producer_lane}))  # Old lane deadlocks.
+        build = jobs["build"]
+        runtime = build.index("Check coordinator lane and runtime before any dispatch")
+        retained = build.index("Persist release intent before any dispatch")
+        dispatch = build.index("python3 scripts/release_desktop.py build")
+        self.assertLess(runtime, retained)
+        self.assertLess(retained, dispatch)
+        self.assertIn("import sys,tomllib", build)
+        self.assertIn("test -x /usr/bin/openssl", build)
+        for key in ("APP_SIGNING_KEY", "PUBLISH_SSH_KEY", "RELEASE_VERIFIER_PATH", "RELEASE_SIGNER_PATH", "environment:"):
+            self.assertNotIn(key, build)
+
+
 class GitHubHandoffTests(unittest.TestCase):
     def test_all_five_fixed_product_job_and_artifact_contracts(self):
         for app in github.PRODUCTS:
-            plan = fixture_plan(app)
-            github.validate_run(fixture_run(plan), plan, completed=True)
-            github.validate_jobs(fixture_jobs(plan), plan)
-            self.assertEqual(set(github.validate_artifacts(fixture_artifacts(plan), plan)), set(github.TARGETS))
+            for attempt in (1, 2):
+                plan = {**fixture_plan(app), "producerAttempt": attempt}
+                github.validate_run(fixture_run(plan), plan, completed=True)
+                github.validate_jobs(fixture_jobs(plan), plan)
+                self.assertEqual(set(github.validate_artifacts(fixture_artifacts(plan), plan)), set(github.TARGETS))
+
+    def test_bound_attempt_cannot_mix_jobs_or_artifacts_from_another_attempt(self):
+        plan = {**fixture_plan(), "producerAttempt": 2}
+        jobs = fixture_jobs(plan)
+        jobs[0]["run_attempt"] = 1
+        with self.assertRaises(contract.ContractError):
+            github.validate_jobs(jobs, plan)
+        artifacts = fixture_artifacts(plan)
+        artifacts[0] = fixture_artifacts({**plan, "producerAttempt": 1})[0]
+        with self.assertRaises(contract.ContractError):
+            github.validate_artifacts(artifacts, plan)
+        for value in (True, 0, -1, "2", 10000):
+            with self.subTest(value=value), self.assertRaises(contract.ContractError):
+                github.producer_attempt({**plan, "producerAttempt": value})
 
     def test_wrong_ref_sha_workflow_event_repository_attempt_request_and_run_rejected(self):
         plan = fixture_plan()
@@ -335,28 +425,92 @@ class PublisherRecoveryTests(unittest.TestCase):
         with mock.patch.object(publish_artifact, "_fetch_exact", return_value=canonical(catalog)):
             desktop.check_public_version(plan, policy, False)  # First honest upgrade of observed Mac history.
 
+    def test_failed_request_retries_only_on_explicit_original_coordinator_rerun(self):
+        old = fixture_source_plan()
+        failed = {**fixture_run(old), "conclusion": "failure"}
+        artifact = fixture_publisher_artifact(old)
+        for attempt, expected in ((1, False), (2, True)):
+            with tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                with fixture_planning(work, [(old, artifact)], {old["producerRun"]: failed}, attempt=attempt) as api:
+                    desktop.plan_release("papir", "integration", work)
+                    selected, action = desktop.load(work / "plan.json"), desktop.load(work / "action.json")
+                    self.assertEqual(action["fresh"], expected)
+                    self.assertFalse(any("dispatches" in c.args[0] for c in api.request.call_args_list))
+                    if expected:
+                        self.assertEqual(selected["retryOf"], {"planSha256": hashlib.sha256(canonical(old)).hexdigest(), "request": old["request"], "run": old["producerRun"], "attempt": 1})
+                        self.assertNotEqual(selected["request"], old["request"])
+                        self.assertNotIn("producerRun", selected)
+                        for field in desktop.SOURCE_FIELDS:
+                            self.assertEqual(selected[field], old[field])
+                    else:
+                        self.assertEqual(selected, old)
+        with tempfile.TemporaryDirectory() as temporary, fixture_planning(Path(temporary), [(old, artifact)], {old["producerRun"]: failed}, branch_source="c" * 40), self.assertRaisesRegex(contract.ContractError, "branch moved"):
+            desktop.plan_release("papir", "integration", Path(temporary))
+        env = {"GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "2"}
+        with mock.patch.dict(desktop.os.environ, env):
+            api = mock.Mock()
+            self.assertIsNone(desktop.retry_failed_producer(api, old, "desktop-200-2-" + "e" * 32))
+            api.pages.assert_not_called()
+
+    def test_uncertain_dispatch_reconciles_saved_intent_without_blind_repeat(self):
+        old = fixture_source_plan()
+        failed = {**fixture_run(old), "conclusion": "failure"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            first.mkdir()
+            with fixture_planning(first, [(old, fixture_publisher_artifact(old))], {old["producerRun"]: failed}):
+                desktop.plan_release("papir", "integration", first)
+            retry = desktop.load(first / "plan.json")
+            recovered = root / "recovered"
+            recovered.mkdir()
+            records = [(old, fixture_publisher_artifact(old)), (retry, fixture_publisher_artifact(retry, artifact_id=9))]
+            with fixture_planning(recovered, records, {old["producerRun"]: failed}, attempt=3, correlated=[]) as api:
+                desktop.plan_release("papir", "integration", recovered)
+                selected = desktop.load(recovered / "plan.json")
+                self.assertEqual(selected, retry)
+                self.assertFalse(desktop.load(recovered / "action.json")["fresh"])
+                clock = iter((0, 0, 0, 2))
+                with self.assertRaisesRegex(contract.ContractError, "Timed out"):
+                    github.wait_for_producer(api, selected, timeout=1, clock=lambda: next(clock), pause=lambda _: None)
+                self.assertFalse(any("dispatches" in c.args[0] for c in api.request.call_args_list))
+            for alteration in (lambda p: p["retryOf"].update(planSha256="0" * 64), lambda p: p.update(source="c" * 40), lambda p: p.update(publisherAttempt=1)):
+                wrong = copy.deepcopy(retry)
+                alteration(wrong)
+                records = [(old, fixture_publisher_artifact(old)), (wrong, fixture_publisher_artifact(wrong, artifact_id=9))]
+                with fixture_planning(root, records, {old["producerRun"]: failed}) as api, self.assertRaises(contract.ContractError):
+                    desktop.retained_intent(mock.Mock(), api, [a for _, a in records], "integration", root)
+            with fixture_planning(root, [(old, fixture_publisher_artifact(old))], {old["producerRun"]: failed}, correlated=[failed, {**failed, "id": 999}]) as api, self.assertRaisesRegex(contract.ContractError, "Duplicate producer"):
+                desktop.retry_failed_producer(api, old, retry["request"])
+
     def test_original_workflow_rerun_recovers_immutable_source_without_resolving_moved_branch(self):
         old = fixture_plan()
         product = github.PRODUCTS["papir"]
         paths = ("package.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "package-lock.json")
         old.update(declarations={"fixture": "2.3.4"}, sourceFiles={p: hashlib.sha256(b"fixture").hexdigest() for p in paths}, producerInputs={"signing_kid": "existing-public-kid", "signing_public_key": "existing-public-key"})
-        bundle = {"id": 8, "name": desktop.artifact_name("bundle", old), "workflow_run": {"id": 100}}
+        # A different execution retained signed bytes after the original stopped.
+        signed = {**old, "publisherRun": 200}
+        bundle = fixture_publisher_artifact(signed, "bundle")
+        intent = fixture_publisher_artifact(old, artifact_id=9)
         api, own = mock.Mock(), mock.Mock()
         def response(path):
             if "/git/ref/" in path:
                 self.fail("Retry must not resolve a moved source branch")
             return {"full_name": product["repository"], "id": 7} if "/actions/" not in path else {"id": 81, "path": ".github/workflows/tauri.yml", "state": "active"}
         api.request.side_effect = response
-        own.pages.return_value = [bundle]
+        own.pages.return_value = [intent, bundle]
         def contents(_api, _repo, source, path):
             self.assertEqual(source, old["source"])
             return b"release_request: desktop_release: source_sha:" if path.endswith(".yml") else b"lapkb-actions-candidate-v1" if path.endswith(".py") else b"fixture"
         env = {"GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "b" * 40,
                "RELEASE_PAPIR_SIGNING_KID": "existing-public-kid", "RELEASE_PAPIR_SIGNING_PUBLIC_KEY": "existing-public-key"}
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(desktop.os.environ, env), mock.patch.object(desktop, "publisher_guard", return_value="launcher"), mock.patch.object(desktop, "app_api", return_value=api), mock.patch.object(desktop, "GitHub", return_value=own), mock.patch.object(desktop, "content", side_effect=contents), mock.patch.object(desktop, "derive_version", return_value=("2.3.4", old["declarations"])), mock.patch.object(desktop, "publisher_artifact", return_value=(old, Path(temporary))):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(desktop.os.environ, env), mock.patch.object(desktop, "publisher_guard", return_value="launcher"), mock.patch.object(desktop, "app_api", return_value=api), mock.patch.object(desktop, "GitHub", return_value=own), mock.patch.object(desktop, "content", side_effect=contents), mock.patch.object(desktop, "derive_version", return_value=("2.3.4", old["declarations"])), mock.patch.object(desktop, "publisher_artifact", side_effect=lambda _api, _artifact, _mode, kind, _workspace: (signed if kind == "bundle" else old, Path(temporary))):
             desktop.plan_release("papir", "integration", Path(temporary))
-            self.assertEqual(desktop.load(Path(temporary) / "plan.json"), old)
+            self.assertEqual(desktop.load(Path(temporary) / "plan.json"), signed)
+            self.assertEqual(desktop.load(Path(temporary) / "action.json")["kind"], "bundle")
             self.assertFalse(desktop.load(Path(temporary) / "action.json")["fresh"])
+            api.pages.assert_not_called()
 
 
 class SignedAutomationTests(unittest.TestCase):
@@ -399,7 +553,7 @@ class SignedAutomationTests(unittest.TestCase):
         app, version = plan["app"], plan["version"]
         identity = {"bundleIdentifier": contract.BUNDLE_IDS[app], "displayName": contract.WINDOWS_PRODUCTS[app],
                     "executable": self.policy.apps[app]["executable"], "architecture": target.split("-")[-1], "version": version}
-        build = {"runId": str(plan["producerRun"]), "runAttempt": 1, "profile": "public-staging"}
+        build = {"runId": str(plan["producerRun"]), "runAttempt": github.producer_attempt(plan), "profile": "public-staging"}
         def file(name, payload):
             prepare_bundle.write_new(directory / name, payload)
             return {"filename": name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
@@ -418,16 +572,16 @@ class SignedAutomationTests(unittest.TestCase):
         candidate = {"schema": "lapkb-actions-candidate-v1", "app": app, "repository": plan["repository"],
                      "workflow": github.PRODUCTS[app]["workflow"], "workflowRef": f"{plan['repository']}/.github/workflows/{github.PRODUCTS[app]['workflow']}@refs/heads/{plan['branch']}",
                      "source": plan["source"], "version": version, "target": target, "request": plan["request"],
-                     "runId": str(plan["producerRun"]), "runAttempt": 1, "job": github.PRODUCTS[app]["jobs"][target][0],
+                     "runId": str(plan["producerRun"]), "runAttempt": github.producer_attempt(plan), "job": github.PRODUCTS[app]["jobs"][target][0],
                      "inventory": inventory, "inventoryDigest": hashlib.sha256(canonical(inventory)).hexdigest()}
         prepare_bundle.write_new(directory / "release-candidate.json", canonical(candidate))
 
-    def prepared(self):
+    def prepared(self, plan=None):
         work = self.root.parent / "work"
         work.mkdir(mode=0o700)
         candidates = work / "candidates"
         candidates.mkdir(mode=0o700)
-        plan = fixture_plan()
+        plan = plan or fixture_plan()
         for target in github.TARGETS:
             self.candidate(candidates / target, plan, target)
         signer = mock.Mock()
@@ -435,6 +589,66 @@ class SignedAutomationTests(unittest.TestCase):
         output = work / "bundle"
         meta = prepare_bundle.prepare(plan, self.policy, candidates, output, signer, VERIFIER)
         return plan, output, meta, signer
+
+    def test_transient_failed_or_cancelled_producer_explicit_retry_collects_same_source_pair(self):
+        for conclusion in ("failure", "cancelled"):
+            with self.subTest(conclusion=conclusion):
+                old = fixture_source_plan()
+                failed = {**fixture_run(old), "conclusion": conclusion}
+                work = self.root.parent / ("retry-" + conclusion)
+                work.mkdir(mode=0o700)
+                with fixture_planning(work, [(old, fixture_publisher_artifact(old))], {old["producerRun"]: failed}):
+                    desktop.plan_release("papir", "integration", work)
+                    plan, action = desktop.load(work / "plan.json"), desktop.load(work / "action.json")
+                    self.assertTrue(action["fresh"])
+                    # Fixture for the workflow's immutable upload-before-POST step.
+                    desktop.save(work / "persisted-retry-intent.json", plan)
+                    bound = {**plan, "producerRun": 23456}
+                    packages = work / "producer"
+                    packages.mkdir()
+                    archives = {}
+                    for target in github.TARGETS:
+                        directory = packages / target
+                        self.candidate(directory, bound, target)
+                        payload = io.BytesIO()
+                        with zipfile.ZipFile(payload, "w") as archive:
+                            for path in directory.iterdir():
+                                archive.writestr(path.name, path.read_bytes())
+                        archives[target] = payload.getvalue()
+                    api = mock.Mock()
+                    artifacts = fixture_artifacts(bound)
+                    api.pages.side_effect = [[fixture_run(bound)], fixture_jobs(bound), artifacts]
+                    def response(path, *, body=None, destination=None, work=work,
+                                 plan=copy.deepcopy(plan), old=old, bound=bound,
+                                 artifacts=artifacts, archives=archives):
+                        if path.endswith("/dispatches"):
+                            self.assertEqual(desktop.load(work / "persisted-retry-intent.json"), plan)
+                            self.assertEqual(body["inputs"]["source_sha"], old["source"])
+                            self.assertEqual(body["inputs"]["release_request"], plan["request"])
+                            return None
+                        if destination:
+                            target = next(t for t, a in zip(github.TARGETS, artifacts, strict=True) if f"/artifacts/{a['id']}/" in path)
+                            destination.write_bytes(archives[target])
+                            return None
+                        return fixture_run(bound)
+                    api.request.side_effect = response
+                    with mock.patch.object(desktop, "app_api", return_value=api):
+                        desktop.build(plan, action, work)
+                    self.assertEqual(sum("dispatches" in c.args[0] for c in api.request.call_args_list), 1)
+                built = desktop.load(work / "built-plan.json")
+                self.assertEqual((built["source"], built["version"], built["producerRun"], built["producerAttempt"]), (old["source"], old["version"], 23456, 1))
+                signer = mock.Mock()
+                signer.sign.side_effect = lambda path, scratch: self.signer.sign(path.read_bytes())
+                output = work / "bundle"
+                prepare_bundle.prepare(built, self.policy, work / "candidates", output, signer, VERIFIER)
+                releases = prepare_bundle.validate_bundles(built, self.policy, output, VERIFIER)
+                self.assertEqual(set(releases), {"macos-arm64", "windows-x64"})
+                self.assertTrue(all(t["build"] == {"runId": "23456", "runAttempt": 1, "profile": "public-staging"} for r in releases.values() for t in r["receipt"]["targets"].values()))
+                for target in github.TARGETS:
+                    with self.assertRaises(contract.ContractError):
+                        github.validate_candidate(work / "candidates" / target, {**built, "producerAttempt": 2}, target)
+                    with self.assertRaises(contract.ContractError):
+                        prepare_bundle.read_proof(work / "candidates" / target, {**built, "producerRun": old["producerRun"]}, target, self.policy)
 
     def test_preparation_canonical_parity_original_inventory_and_native_signatures(self):
         plan, output, meta, signer = self.prepared()
@@ -504,7 +718,8 @@ class SignedAutomationTests(unittest.TestCase):
     def test_partial_failure_retries_only_immutable_signed_bytes_and_preserves_other_apps(self):
         self.publish("bestdose", make_bundle(self.signer, self.policy, app="bestdose", version="2.3.3", coverage="macos-arm64"))
         before = public_snapshot(self.root)
-        plan, output, _, signer = self.prepared()
+        # Legacy retained bundles omit producerAttempt but bind exact attempt 1.
+        plan, output, _, signer = self.prepared({k: v for k, v in fixture_plan().items() if k != "producerAttempt"})
         signed_before = {str(p.relative_to(output)): p.read_bytes() for p in output.rglob("*") if p.is_file()}
         def writer(app, channel, directory):
             bundle = {p.name: p.read_bytes() for p in directory.iterdir()}
@@ -536,6 +751,16 @@ class SignedAutomationTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError):
             desktop.publish_pair(plan, self.policy, output, VERIFIER, output.parent / "first-results", publish=interrupted)
         publisher.recover_publications(self.policy, verifier=VERIFIER)
+        action = {"kind": "bundle", "fresh": False, "artifact": fixture_publisher_artifact(plan, "bundle")}
+        recovery = output.parent / "recovery"
+        recovery.mkdir(mode=0o700)
+        with mock.patch.object(desktop, "publisher_guard"), mock.patch.object(desktop, "app_api") as api, mock.patch.object(desktop, "wait_for_producer") as wait:
+            desktop.build(plan, action, recovery)
+            api.assert_not_called()
+            wait.assert_not_called()
+        with mock.patch.object(desktop, "GitHub"), mock.patch.object(desktop, "publisher_artifact", return_value=(plan, output)):
+            output = desktop.restore_bundle(plan, action, recovery)
+        self.assertEqual(signed_before, {str(p.relative_to(output)): p.read_bytes() for p in output.rglob("*") if p.is_file()})
         results = desktop.publish_pair(plan, self.policy, output, VERIFIER, output.parent / "retry-results", publish=writer, execution={"run": 100, "attempt": 2, "source": "b" * 40})
         self.assertEqual([r["status"] for r in results], ["identical-retry", "published"])
         self.assertEqual(signer.sign.call_count, 6)

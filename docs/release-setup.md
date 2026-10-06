@@ -7,18 +7,30 @@ Normal project-manager releases need no terminal or artifact handling.
 
 ## Protected authorization
 
-In `LAPKB/desktop-releases`, create two protected environments:
+After the separate one-time owner approval, create two protected environments
+in `LAPKB/desktop-releases`. Use **Selected branches and tags**, with an exact
+**branch** rule (not a tag rule) for each:
 
-- `desktop-release-integration`: allow only publisher branch `launcher`.
-- `desktop-release-main`: allow only publisher branch `main`.
+- `desktop-release-integration`: publisher branch `launcher` only.
+- `desktop-release-main`: publisher branch `main` only.
 
-Require the owner's release reviewer; prevent self-review and administrator
-bypass. Restrict trusted runners/workflows through the existing runner controls
-only with separate approval. No PR, tag, fork or arbitrary branch may access these
-environments. The same workflow uses the fixed product main/integration mapping;
-there is no source-ref input. Per-app publication is serialized across both modes
-and running publication is never cancelled. Restrict edits to this workflow,
-coordinator and policy with the repository's review controls.
+Main releases use the project managers' existing authorized repository write /
+Actions workflow-dispatch permissions. Do **not** add required reviewers,
+prevent-self-review, a wait timer or an owner approval for each routine release.
+Both setup-check and publication jobs enter the environment automatically; this
+is not two manual approvals. One-time key/grant/policy/setup approval remains
+mandatory and unconsumed. No environments from this proposal are installed;
+this document does not remove or weaken any existing configured protection.
+If existing permissions or a future policy require another actor to unblock a
+PM dispatch, report that concrete permission gate before claiming one-click
+releases; do not silently add owner intervention as automation.
+
+Keep source review and protected `main`, including review controls for workflow,
+coordinator and policy edits. The workflow's event/ref/mode guards, fixed product
+mapping, immutable SHA checks and environment branch restrictions jointly exclude
+PRs, tags, forks and arbitrary refs from signing/publication. There is no source-ref
+input. Runner/workflow control changes need separate approval. Per-app publication
+is serialized across both modes and running publication is never cancelled.
 
 ## Narrow dispatch/read credential
 
@@ -31,7 +43,7 @@ SSH export authority, organization administration or general repository grant.
 Publisher repository variable: `RELEASE_APP_ID`. Publisher repository secret:
 `RELEASE_APP_PRIVATE_KEY` (the approved App credential, not an app signing key).
 CI requests tokens for one selected repository only; planning/read recovery asks
-for Actions read, the original dispatch asks for Actions write. Tokens renew
+for Actions read, a persisted original or explicit retry dispatch asks for Actions write. Tokens renew
 inside the bounded coordinator wait and are never artifacts or job outputs.
 The publisher's own `GITHUB_TOKEN` needs only Contents read + Actions read.
 
@@ -70,9 +82,24 @@ signatures/bytes are verified and copied, never re-signed/repacked by the publis
 
 ## Native tools and forced receive-only transport
 
-Provision reviewed **Linux X64 native** tools on the approved Default runner,
-outside any product download directory. Use Python 3.11+ and `/usr/bin/openssl`
-for standard GitHub App JWT authentication. The release verifier is the existing
+The dispatch/wait/collection job is fixed to the existing **rust / self-hosted /
+Linux / ARM64** publisher lane, never Default/X64 or an optional routing default.
+Producer Windows jobs need the scarce Default/X64 worker. Setup/key/native-tool
+authorization uses X64 **before** collection; signing/publication uses X64 **after**
+collection, so neither holds that worker while waiting for its child producer.
+Existing publisher native-verifier run **37236680808/1**, source
+`1618e4e24d7dc56666ef17c447d3ac0f5ba9997a`, job **111537072604** on `mhovd-pgx`
+in group `rust` demonstrates repository access, Linux ARM64 and Python execution.
+Its artifact also records OpenSSL-backed Cargo, **not** proof of Python 3.11+ or
+the `/usr/bin/openssl` CLI. Those exact runtime prerequisites remain to be verified
+on this lane in approved CI; the job checks them before retaining/dispatching any
+intent and fails early if absent. No runtime installation, runner/grant change
+or assumed GitHub-hosted capacity is included here. Any missing runtime needs
+separately approved one-time provisioning, not PM artifact handling.
+
+Provision reviewed **Linux X64 native** signing/verification tools on the approved
+Default runner, outside any product download directory. Both lanes require Python
+3.11+; the coordinator uses `/usr/bin/openssl` for standard GitHub App JWT authentication. The release verifier is the existing
 locked `host/verifier` implementation, built/tested only in approved CI; retain
 its exact source/run/attempt/ABI/hash receipt. Do not install an ARM64/Mac export
 on the X64 worker or execute a downloaded product/helper.
@@ -169,8 +196,24 @@ bytes/receipts and the existing transaction/retry path. It never regenerates
 signatures, silently overwrites a version or selects a latest successful build.
 Artifacts are retained for 90 days; beyond that, an administrator must reconcile
 missing evidence with the existing durable state before any publication, not
-invent a fresh same-version bundle. Failed producer requests are not blindly
-redispatched. Fix/version the product coherently before a new release request.
+invent a fresh same-version bundle. A transient failed/cancelled producer needs no version bump or manual artifact
+handling. **Re-run all jobs** on the original coordinator: only that explicit rerun
+may create one new correlated producer run at the identical source/config/version,
+and only after proving the exact predecessor failed/cancelled. The new plan records
+the predecessor plan hash/request/run/attempt and is uploaded before the one POST.
+Both successful target jobs, proofs and artifacts must bind the new exact producer
+run/attempt/request; a target from the failed run cannot complete the pair. Retry
+intents form one validated predecessor chain, not a latest-success selection.
+Signed bundles always win before any retry/rebuild and keep their original bytes.
+
+If a dispatch outcome is uncertain or its run is not found, retries only join that
+persisted request; they never blindly submit it again. Duplicate/disconnected
+intents or runs stop. This correction uses a fresh producer dispatch, not manual
+producer Re-run jobs: its first attempt is explicitly bound, and unexpected producer
+attempts are rejected. The existing producer source/ref guards are unchanged, so a
+retry requires the trusted product branch still to have the frozen source head.
+Branch movement/source corrections need a coherently versioned new release; they
+cannot substitute new source into the failed same-version request.
 
 A green fixture suite or queued build is **not** live end-to-end acceptance.
 Before opening a PR, the owner requires actual automated two-target build/test,

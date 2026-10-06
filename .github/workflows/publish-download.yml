@@ -161,11 +161,21 @@ jobs:
   build:
     name: Build qualified candidates
     needs: [plan, authorize]
+    # Waiting here must never reserve the sole Linux X64 producer worker.
+    # This existing publisher lane has native-verifier delivery evidence.
     runs-on:
-      group: Default
-      labels: [self-hosted, Linux, X64]
+      group: rust
+      labels: [self-hosted, Linux, ARM64]
     timeout-minutes: 225
     steps:
+      - name: Check coordinator lane and runtime before any dispatch
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = ARM64
+          python3 -c 'import sys,tomllib; assert sys.version_info >= (3,11), "Coordinator requires Python 3.11+ on the existing rust ARM64 lane"'
+          test -x /usr/bin/openssl
+          /usr/bin/openssl version
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: LAPKB/desktop-releases
@@ -189,6 +199,8 @@ jobs:
           name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.private.outputs.directory }}
       - name: Persist release intent before any dispatch
+        # Includes a fresh retry intent only after an explicit coordinator rerun
+        # proves its predecessor failed/cancelled; upload must precede the POST.
         if: needs.plan.outputs.fresh == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

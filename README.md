@@ -14,12 +14,19 @@ implement another updater, installer worker or authorization service.
 3. A green release summary shows the derived version, exact source commit and
    verified public feed/installer/download links for **Mac ARM64 + Windows x64**.
 
-That is the whole normal procedure: no supplied version/hash/key, artifact copy,
-manual signing, release-branch push, packet script or operator publication.
+That is the whole normal procedure for already-authorized project managers:
+no per-release owner approval, supplied version/hash/key, artifact copy, manual
+signing, release-branch push, packet script or operator publication. One-time
+administrator approval/setup and protected source/environment branches remain.
 Ordinary pushes validate only; PRs, tags and untrusted refs cannot publish. Both
 qualified producer jobs/tests must succeed before either app feed advances.
-A failed/interrupted run can be re-run to reconcile its exact retained signed
-bundle or dispatch intent. It cannot blindly rebuild/re-sign a public version.
+For a transient failure, use **Re-run all jobs** on the original release workflow.
+Signed-bundle recovery comes first and never rebuilds/re-signs a public version.
+Otherwise a proven failed/cancelled producer can get one new, persisted retry
+request at the same source/version, while its trusted branch head is unchanged.
+Both new target jobs/proofs/artifacts must succeed together. An uncertain dispatch
+is only reconciled, never blindly repeated. No product version bump or manual
+producer artifact handling is needed for a same-source transient failure.
 
 Administrator authorization/setup is separate: [one-time setup](docs/release-setup.md).
 Missing configuration, moved source branches, incoherent/already-published

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from release_github import TARGETS, require, validate_candidate
+from release_github import TARGETS, producer_attempt, require, validate_candidate
 import release_contract as contract
 import publish_artifact
 
@@ -74,7 +74,7 @@ def read_proof(directory, plan, target, policy):
     validate_candidate(directory, plan, target)
     filename = "macos-package.json" if target == "darwin-aarch64" else "windows-package.json"
     proof = contract.strict_json(contract._read_regular(directory / filename, 2 * 1024 * 1024, "package proof"), 2 * 1024 * 1024, "package proof")
-    build = {"runId": str(plan["producerRun"]), "runAttempt": 1, "profile": "public-staging"}
+    build = {"runId": str(plan["producerRun"]), "runAttempt": producer_attempt(plan), "profile": "public-staging"}
     require(type(proof) is dict and proof.get("schema") == ("lapkb-macos-package-v1" if target == "darwin-aarch64" else "lapkb-windows-package-v1") and proof.get("app") == plan["app"] and proof.get("target") == target and proof.get("version") == plan["version"] and proof.get("sourceCommit") == plan["source"] and proof.get("build") == build, "Native package proof source/run/attempt/profile/version/target differs")
     identity = {"bundleIdentifier": contract.BUNDLE_IDS[plan["app"]], "displayName": contract.WINDOWS_PRODUCTS[plan["app"]] if target == "windows-x86_64" or plan["app"] == "launcher" else contract.DISPLAY_NAMES[plan["app"]], "executable": policy.apps[plan["app"]]["executable"], "architecture": target.split("-")[-1], "version": plan["version"]}
     if target == "darwin-aarch64":
@@ -173,7 +173,7 @@ def validate_bundles(plan, policy, output, verifier, *, _preparing=False):
         bundle = output / scope
         release = contract.validate_release(plan["app"], "stable", {p.name: p for p in bundle.iterdir()}, policy, verifier=verifier, scratch=output.parent)
         require(release["coverage"] == scope and release["version"] == plan["version"] and release["source"]["repository"] == plan["repository"] and release["source"]["branch"] == plan["branch"] and release["source"]["commit"] == plan["source"], "Immutable retry version/source/coverage differs")
-        require(all(t["build"] == {"runId": str(plan["producerRun"]), "runAttempt": 1, "profile": "public-staging"} for t in release["receipt"]["targets"].values()), "Immutable retry mixes producer run/attempts")
+        require(all(t["build"] == {"runId": str(plan["producerRun"]), "runAttempt": producer_attempt(plan), "profile": "public-staging"} for t in release["receipt"]["targets"].values()), "Immutable retry mixes producer run/attempts")
         releases[scope] = release
     if "automation.json" in allowed:
         raw = contract._read_regular(output / "automation.json", 2 * 1024 * 1024, "immutable release metadata")

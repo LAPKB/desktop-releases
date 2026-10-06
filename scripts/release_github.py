@@ -160,13 +160,20 @@ class AppToken:
         return self.token
 
 
+def producer_attempt(plan):
+    # Old immutable bundles predate this explicit field and bind attempt 1.
+    attempt = plan.get("producerAttempt", 1)
+    require(type(attempt) is int and 1 <= attempt <= 9999, "Invalid bound producer attempt")
+    return attempt
+
+
 def validate_run(run, plan, *, completed=False):
     product = PRODUCTS[plan["app"]]
     expected = {"event": "workflow_dispatch", "head_branch": plan["branch"], "head_sha": plan["source"], "display_title": "desktop-release " + plan["request"], "workflow_id": plan["workflowId"]}
     require(type(run) is dict and all(run.get(k) == v for k, v in expected.items()), "Producer run has wrong workflow/event/ref/SHA/request identity")
     require(type(run.get("repository")) is dict and type(run.get("head_repository")) is dict and run["repository"].get("full_name") == product["repository"] and run["head_repository"].get("full_name") == product["repository"], "Producer run repository differs from selected product")
     require(run.get("path") == ".github/workflows/" + product["workflow"] and type(run.get("id")) is int and run["id"] > 0, "Producer workflow path/run identity is invalid")
-    require(type(run.get("run_attempt")) is int and run["run_attempt"] == 1, "Producer reruns are not the captured exact attempt; start a newly reviewed release request")
+    require(type(run.get("run_attempt")) is int and run["run_attempt"] == producer_attempt(plan), "Producer attempt differs from the persisted exact intent")
     if "producerRun" in plan:
         require(run["id"] == plan["producerRun"], "Producer run changed after binding")
     if completed:
@@ -188,7 +195,7 @@ def validate_jobs(jobs, plan):
             require(job.get("conclusion") in ("success", "skipped") and job.get("status") == "completed", "An additional producer job failed or is incomplete")
             continue
         require(name not in matched, "Duplicate required producer job")
-        require(type(job.get("run_id")) is int and job["run_id"] == plan["producerRun"] and type(job.get("run_attempt")) is int and job["run_attempt"] == 1 and job.get("head_sha") == plan["source"] and job.get("status") == "completed" and job.get("conclusion") == "success", "Required producer job has wrong run/attempt/source or failed")
+        require(type(job.get("run_id")) is int and job["run_id"] == plan["producerRun"] and type(job.get("run_attempt")) is int and job["run_attempt"] == producer_attempt(plan) and job.get("head_sha") == plan["source"] and job.get("status") == "completed" and job.get("conclusion") == "success", "Required producer job has wrong run/attempt/source or failed")
         steps = job.get("steps")
         require(type(steps) is list and steps and all(type(s) is dict for s in steps), "Required producer job has no completed step evidence")
         require(all(s.get("status") == "completed" and s.get("conclusion") in ("success", "skipped") for s in steps), "Producer step failed or is incomplete")
@@ -203,7 +210,7 @@ def validate_jobs(jobs, plan):
 
 
 def candidate_name(plan, target):
-    return f"candidate-{plan['app']}-{plan['source']}-{plan['producerRun']}-1-{target}-{plan['request']}"
+    return f"candidate-{plan['app']}-{plan['source']}-{plan['producerRun']}-{producer_attempt(plan)}-{target}-{plan['request']}"
 
 
 def validate_artifacts(artifacts, plan):
@@ -285,11 +292,19 @@ def validate_candidate(directory, plan, target):
     candidate = contract.strict_json(raw, contract.MAX_ATTESTATION_BYTES, "Actions candidate")
     product = PRODUCTS[plan["app"]]
     job = product["jobs"][target][0]
-    expected = {"schema": "lapkb-actions-candidate-v1", "app": plan["app"], "repository": product["repository"], "workflow": product["workflow"], "workflowRef": f"{product['repository']}/.github/workflows/{product['workflow']}@refs/heads/{plan['branch']}", "source": plan["source"], "version": plan["version"], "target": target, "request": plan["request"], "runId": str(plan["producerRun"]), "runAttempt": 1, "job": job}
+    expected = {"schema": "lapkb-actions-candidate-v1", "app": plan["app"], "repository": product["repository"], "workflow": product["workflow"], "workflowRef": f"{product['repository']}/.github/workflows/{product['workflow']}@refs/heads/{plan['branch']}", "source": plan["source"], "version": plan["version"], "target": target, "request": plan["request"], "runId": str(plan["producerRun"]), "runAttempt": producer_attempt(plan), "job": job}
     require(type(candidate) is dict and set(candidate) == set(expected) | {"inventory", "inventoryDigest"} and all(type(candidate[k]) is type(v) and candidate[k] == v for k, v in expected.items()) and contract.canonical_json(candidate) == raw, "Candidate source/run/attempt/request/target/job identity differs")
     actual = [i for i in inventory(directory) if i["name"] != "release-candidate.json"]
     require(candidate["inventory"] == actual and candidate["inventoryDigest"] == hashlib.sha256(contract.canonical_json(actual)).hexdigest(), "Candidate complete original inventory differs from its correlation proof")
     return candidate
+
+
+def find_producer(api, plan):
+    base = "/repos/" + PRODUCTS[plan["app"]]["repository"] + "/actions"
+    runs = api.pages(f"{base}/workflows/{plan['workflowId']}/runs?event=workflow_dispatch&branch={urllib.parse.quote(plan['branch'], safe='')}", "workflow_runs")
+    matched = [r for r in runs if r.get("display_title") == "desktop-release " + plan["request"]]
+    require(len(matched) <= 1, "Duplicate producer runs for the persisted request; no signing")
+    return validate_run(matched[0], plan) if matched else None
 
 
 def wait_for_producer(api, plan, *, dispatch=False, timeout=3 * 60 * 60 + 30 * 60, pause=time.sleep, clock=time.monotonic):
@@ -301,18 +316,15 @@ def wait_for_producer(api, plan, *, dispatch=False, timeout=3 * 60 * 60 + 30 * 6
     deadline = clock() + timeout
     while clock() < deadline:
         if "producerRun" not in plan:
-            runs = api.pages(f"{base}/workflows/{plan['workflowId']}/runs?event=workflow_dispatch&branch={urllib.parse.quote(plan['branch'], safe='')}", "workflow_runs")
-            matched = [r for r in runs if r.get("display_title") == "desktop-release " + plan["request"]]
-            require(len(matched) <= 1, "Duplicate producer runs for the persisted request; no signing")
-            if matched:
-                validate_run(matched[0], plan)
-                plan["producerRun"] = matched[0]["id"]
+            run = find_producer(api, plan)
+            if run:
+                plan["producerRun"] = run["id"]
         if "producerRun" in plan:
-            run = api.request(f"{base}/runs/{plan['producerRun']}/attempts/1")
+            run = api.request(f"{base}/runs/{plan['producerRun']}/attempts/{producer_attempt(plan)}")
             validate_run(run, plan)
             if run["status"] == "completed":
                 validate_run(run, plan, completed=True)
-                jobs = api.pages(f"{base}/runs/{plan['producerRun']}/attempts/1/jobs", "jobs")
+                jobs = api.pages(f"{base}/runs/{plan['producerRun']}/attempts/{producer_attempt(plan)}/jobs", "jobs")
                 validate_jobs(jobs, plan)
                 artifacts = validate_artifacts(api.pages(f"{base}/runs/{plan['producerRun']}/artifacts", "artifacts"), plan)
                 return {"run": run, "jobs": jobs, "artifacts": artifacts}

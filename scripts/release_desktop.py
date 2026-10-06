@@ -2,7 +2,8 @@
 
 Plan -> protected setup gate -> credential-free candidate collection -> protected
 canonical signing -> immutable Actions retention -> existing receive-v1 writer.
-Retries recover exact signed bytes or reconcile the persisted dispatch intent.
+Explicit retries recover signed bytes first; only a proven failed/cancelled
+producer may get one new, same-source request after its retry intent is retained.
 There is no operator source-ref, version, hash, artifact-path or key input.
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ import urllib.parse
 from pathlib import Path
 
 from release_github import (AppToken, GitHub, PRODUCTS, PUBLISHER, REQUEST, SHA, TARGETS,
-    Error, extract_archive, require, validate_candidate, wait_for_producer)
+    Error, extract_archive, find_producer, producer_attempt, require, validate_candidate, validate_run, wait_for_producer)
 import release_contract as contract
 import publish_artifact
 import prepare_bundle
@@ -88,7 +89,10 @@ def derive_version(files, app):
 
 
 def artifact_name(kind, plan):
-    return f"release-{kind}-{plan['app']}-{plan['version']}-{plan['source']}"
+    name = f"release-{kind}-{plan['app']}-{plan['version']}-{plan['source']}"
+    if kind == "intent" and "retryOf" in plan:
+        name += f"-{plan['publisherRun']}-{plan['publisherAttempt']}"
+    return name
 
 
 PUBLISH_STEP = "Publish through receive-v1 and verify both public feeds, files, catalog and page"
@@ -181,6 +185,49 @@ def require_completed_prior_bundles(api, artifacts, selected_name, workspace, ap
         require(proven, f"Previous {app} release is only partially verified: re-run publisher run {bundle.get('workflow_run', {}).get('id')}; no new signing/build may hide it")
 
 
+SOURCE_FIELDS = ("app", "mode", "repository", "repositoryId", "branch", "source", "version", "declarations", "sourceFiles", "workflowId", "producerInputs")
+
+
+def retained_intent(own, api, artifacts, mode, workspace):
+    """Follow a single proven retry chain, never select an unrelated/latest build."""
+    require(1 <= len(artifacts) <= 64, "Missing/oversized retained intent chain")
+    records = [(publisher_artifact(own, a, mode, "intent", workspace)[0], a) for a in artifacts]
+    records.sort(key=lambda r: r[0]["publisherAttempt"])
+    require("retryOf" not in records[0][0], "Original dispatch intent is missing; no blind retry")
+    for (prior, _), (current, _) in zip(records, records[1:], strict=False):
+        retry = current.get("retryOf")
+        require(type(retry) is dict and set(retry) == {"planSha256", "request", "run", "attempt"} and type(retry.get("run")) is int and retry["run"] > 0 and type(retry.get("attempt")) is int and retry["attempt"] == producer_attempt(prior), "Ambiguous/malformed producer retry predecessor")
+        require(all(current.get(k) == prior.get(k) for k in SOURCE_FIELDS + ("publisherRun", "publisherSource", "publisherBranch")) and current["publisherAttempt"] > prior["publisherAttempt"] and current["request"] != prior["request"] and producer_attempt(current) == 1 and "producerRun" not in current and retry["request"] == prior["request"] and retry["planSha256"] == hashlib.sha256(contract.canonical_json(prior)).hexdigest(), "Duplicate, mixed-source or disconnected producer retry intents")
+        failed = api.request(f"/repos/{prior['repository']}/actions/runs/{retry['run']}/attempts/{retry['attempt']}")
+        validate_run(failed, {**prior, "producerRun": retry["run"]})
+        require(failed["status"] == "completed" and failed.get("conclusion") in ("failure", "cancelled"), "Retry predecessor is not a proven failed/cancelled producer")
+    return records[-1]
+
+
+def retry_failed_producer(api, plan, request):
+    """An explicit original-coordinator rerun can retry once, not an agent loop.
+
+    A new workflow dispatch starts attempt 1 with a new correlation identity.
+    The old source/config remain frozen, and the existing producer guards still
+    demand the trusted branch's exact head. An uncertain dispatch is joined,
+    never repeated; its retained intent remains the head of this chain.
+    """
+    if int(os.environ["GITHUB_RUN_ID"]) != plan["publisherRun"] or int(os.environ["GITHUB_RUN_ATTEMPT"]) <= plan["publisherAttempt"]:
+        return None
+    run = find_producer(api, plan)
+    if run is None:
+        return None  # Uncertain prior dispatch: keep joining its existing intent.
+    failed = api.request(f"/repos/{plan['repository']}/actions/runs/{run['id']}/attempts/{producer_attempt(plan)}")
+    validate_run(failed, {**plan, "producerRun": run["id"]})
+    if failed["status"] != "completed" or failed.get("conclusion") not in ("failure", "cancelled"):
+        return None
+    ref = api.request(f"/repos/{plan['repository']}/git/ref/heads/{urllib.parse.quote(plan['branch'], safe='')}")
+    require(type(ref) is dict and type(ref.get("object")) is dict and ref.get("ref") == "refs/heads/" + plan["branch"] and ref["object"].get("type") == "commit" and ref["object"].get("sha") == plan["source"], "Failed producer source branch moved; cannot retry a different source at this version")
+    next_plan = {**plan, "request": request, "publisherAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "producerAttempt": 1, "retryOf": {"planSha256": hashlib.sha256(contract.canonical_json(plan)).hexdigest(), "request": plan["request"], "run": run["id"], "attempt": producer_attempt(plan)}}
+    next_plan.pop("producerRun", None)
+    return next_plan
+
+
 def plan_release(app, mode, workspace):
     publisher_branch = publisher_guard(mode)
     product = PRODUCTS[app]
@@ -193,10 +240,11 @@ def plan_release(app, mode, workspace):
     if int(os.environ["GITHUB_RUN_ATTEMPT"]) > 1:
         for kind in ("bundle", "intent"):
             matches = [a for a in artifacts if a["name"].startswith(f"release-{kind}-{app}-") and a["workflow_run"].get("id") == int(os.environ["GITHUB_RUN_ID"])]
-            require(len(matches) <= 1, "Original publisher run has ambiguous release evidence")
+            if kind == "bundle":
+                require(len(matches) <= 1, "Original publisher run has ambiguous signed bundles")
             if matches:
-                old, _ = publisher_artifact(own, matches[0], mode, kind, workspace)
-                retry = (old, {"kind": kind, "artifact": matches[0], "fresh": False})
+                old, artifact = retained_intent(own, api, matches, mode, workspace) if kind == "intent" else (publisher_artifact(own, matches[0], mode, kind, workspace)[0], matches[0])
+                retry = (old, {"kind": kind, "artifact": artifact, "fresh": False})
                 break
     branch = "main" if mode == "main" else product["integration"]
     repo = api.request("/repos/" + product["repository"])
@@ -224,24 +272,41 @@ def plan_release(app, mode, workspace):
         kid, public = os.environ.get("RELEASE_PAPIR_SIGNING_KID", ""), os.environ.get("RELEASE_PAPIR_SIGNING_PUBLIC_KEY", "")
         require(kid and public, "Missing RELEASE_PAPIR_SIGNING_KID/RELEASE_PAPIR_SIGNING_PUBLIC_KEY (existing PUBLIC lease-verification configuration, not an archive/account signing key)")
         producer_inputs = {"signing_kid": kid, "signing_public_key": public}
-    plan = {"schema": "lapkb-desktop-release-plan-v1", "app": app, "mode": mode, "repository": product["repository"], "repositoryId": repo["id"], "branch": branch, "source": source, "version": version, "declarations": declarations, "sourceFiles": {p: hashlib.sha256(raw).hexdigest() for p, raw in files.items()}, "workflowId": workflow["id"], "producerInputs": producer_inputs, "request": f"desktop-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{secrets.token_hex(16)}", "publisherRun": int(os.environ["GITHUB_RUN_ID"]), "publisherAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "publisherSource": os.environ["GITHUB_SHA"], "publisherBranch": publisher_branch}
+    plan = {"schema": "lapkb-desktop-release-plan-v1", "app": app, "mode": mode, "repository": product["repository"], "repositoryId": repo["id"], "branch": branch, "source": source, "version": version, "declarations": declarations, "sourceFiles": {p: hashlib.sha256(raw).hexdigest() for p, raw in files.items()}, "workflowId": workflow["id"], "producerInputs": producer_inputs, "producerAttempt": 1, "request": f"desktop-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{secrets.token_hex(16)}", "publisherRun": int(os.environ["GITHUB_RUN_ID"]), "publisherAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "publisherSource": os.environ["GITHUB_SHA"], "publisherBranch": publisher_branch}
     if retry:
         old, action = retry
+        # Another coordinator execution may have signed this frozen source after
+        # the original intent owner stopped. Recover those bytes before a retry.
+        bundles = [a for a in artifacts if a["name"].startswith(f"release-bundle-{app}-{version}-")]
+        require(len(bundles) <= 1, "Duplicate retained signed bundles for this version; no rebuild")
+        if bundles:
+            require(bundles[0]["name"] == artifact_name("bundle", plan), "Retained signed bundle has a different source; no rebuild")
+            if action["kind"] != "bundle":
+                old, _ = publisher_artifact(own, bundles[0], mode, "bundle", workspace)
+                action = {"kind": "bundle", "artifact": bundles[0], "fresh": False}
+            else:
+                require(bundles[0]["id"] == action["artifact"]["id"], "Ambiguous original signed bundle; no rebuild")
     else:
         old, action = None, {"kind": "intent", "fresh": True}
         for kind in ("bundle", "intent"):
             prefix = f"release-{kind}-{app}-{version}-"
             candidates = [a for a in artifacts if a["name"].startswith(prefix)]
-            require(len(candidates) <= 1, "Duplicate retained bundle/dispatch intents for this version; refuse ambiguous signing or dispatch")
+            if kind == "bundle":
+                require(len(candidates) <= 1, "Duplicate retained signed bundles for this version; refuse ambiguous signing")
             if candidates:
-                require(candidates[0]["name"] == artifact_name(kind, plan), "This version already has different-source release bytes/intent; bump coherently instead of reusing a version")
-                old, _ = publisher_artifact(own, candidates[0], mode, kind, workspace)
-                action = {"kind": kind, "artifact": candidates[0], "fresh": False}
+                old, artifact = retained_intent(own, api, candidates, mode, workspace) if kind == "intent" else (publisher_artifact(own, candidates[0], mode, kind, workspace)[0], candidates[0])
+                require(old["source"] == source, "This version already has different-source release bytes/intent; bump coherently instead of reusing a version")
+                action = {"kind": kind, "artifact": artifact, "fresh": False}
                 break
     if old:
-        require(all(old.get(k) == plan[k] for k in ("app", "mode", "repository", "repositoryId", "branch", "source", "version", "declarations", "sourceFiles", "workflowId", "producerInputs")), "Retained version/source/config differs; refuse signing or source reuse")
-        plan = old
+        require(all(old.get(k) == plan[k] for k in SOURCE_FIELDS), "Retained version/source/config differs; refuse signing or source reuse")
     require_completed_prior_bundles(own, artifacts, artifact_name("bundle", plan), workspace, app)
+    if old:
+        retried = retry_failed_producer(api, old, plan["request"]) if action["kind"] == "intent" else None
+        plan = retried or old
+        if retried:
+            # The workflow uploads this exact new plan before the single POST.
+            action = {"kind": "intent", "fresh": True}
     save(workspace / "plan.json", plan)
     save(workspace / "action.json", action)
     output = os.environ.get("GITHUB_OUTPUT")
@@ -373,7 +438,7 @@ def publish_pair(plan, policy, bundle, verifier, output, publish=None, execution
         require(result.get("version") == plan["version"] and result.get("coverage") == scope and result.get("status") in ("published", "identical-retry") and result.get("inventoryDigest") == releases[scope]["inventoryDigest"] and "publicLinks" in result, "Publisher/client result differs from retained signed bytes")
         save(output / (scope + ".json"), result)
         results.append(result)
-    summary = f"## {contract.DISPLAY_NAMES[plan['app']]} {plan['version']} released\n\nSource: `{plan['repository']} {plan['branch']}@{plan['source']}`\n\nBoth qualified target builds/tests passed (producer run {plan['producerRun']}, attempt 1). Signed metadata, public feeds/files, catalog mappings and page installer links verified.\n\n"
+    summary = f"## {contract.DISPLAY_NAMES[plan['app']]} {plan['version']} released\n\nSource: `{plan['repository']} {plan['branch']}@{plan['source']}`\n\nBoth qualified target builds/tests passed (producer run {plan['producerRun']}, attempt {producer_attempt(plan)}). Signed metadata, public feeds/files, catalog mappings and page installer links verified.\n\n"
     for result in results:
         links = result["publicLinks"]
         summary += f"### {result['coverage']}\n- [Downloads]({links['downloads']})\n- [Feed]({links['feed']})\n"
