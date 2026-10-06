@@ -248,6 +248,29 @@ jobs:
             --build-arg PUBLISHER_RUN_ID="$GITHUB_RUN_ID" --build-arg PUBLISHER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             --output "type=local,dest=$JOB_DIRECTORY/evidence" --progress plain "$JOB_DIRECTORY/source"
 
+      # A deliberate one-time integration push marker enables setup in this
+      # maintained validation lane; normal validation never installs tools.
+      - name: Verify and provision the pinned native release tools on X64
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/launcher' &&
+          contains(github.event.head_commit.message, '[release-tools-setup]')
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
+          JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
+        run: python3 scripts/ci/release-tools-setup.py "$JOB_DIRECTORY" "$JOB_IDENTITY"
+
+      - name: Retain the actual native tool installation and closure receipt
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/launcher' &&
+          contains(github.event.head_commit.message, '[release-tools-setup]')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-tools-setup-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.private_job.outputs.directory }}/evidence/release-tools-setup.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Retain actual confined publisher CI evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -266,3 +289,83 @@ jobs:
           JOB_DIRECTORY: ${{ steps.private_job.outputs.directory }}
           JOB_IDENTITY: ${{ steps.private_job.outputs.identity }}
         run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$JOB_DIRECTORY" publisher-jobs2 "$JOB_IDENTITY"
+
+  coordinator-runtime:
+    name: Verify the existing ARM64 coordinator runtime
+    if: >-
+      github.repository == 'LAPKB/desktop-releases' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/launcher' &&
+      contains(github.event.head_commit.message, '[release-tools-setup]')
+    runs-on:
+      group: rust
+      labels: [self-hosted, Linux, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}-runtime
+      - name: Create an identity-bound runtime evidence directory
+        id: private_job
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = aarch64
+          python3 -c 'import sys,tomllib; assert sys.version_info >= (3,11), "Coordinator requires Python 3.11+"'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          job="$(mktemp -d "$RUNNER_TEMP/publisher-jobs2.XXXXXXXXXX")"
+          job="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$job")"
+          chmod 700 "$job"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$job")"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$job" publisher-jobs2 "$identity"
+          printf 'directory=%s\nidentity=%s\n' "$job" "$identity" >> "$GITHUB_OUTPUT"
+      - name: Record actual Python and protected OpenSSL CLI support without credentials
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}-runtime
+        env:
+          WORK: ${{ steps.private_job.outputs.directory }}
+          IDENTITY: ${{ steps.private_job.outputs.identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$WORK" publisher-jobs2 "$IDENTITY"
+          python3 - <<'PY'
+          import hashlib, json, os, stat, subprocess, sys, tomllib
+          from pathlib import Path
+          assert sys.version_info >= (3, 11)
+          tool = Path('/usr/bin/openssl')
+          assert tool.resolve(strict=True) == tool and tool.stat().st_uid == 0
+          assert stat.S_ISREG(tool.stat().st_mode) and not tool.stat().st_mode & 0o022
+          assert os.access(tool, os.X_OK)
+          version = subprocess.run([str(tool), 'version'], check=True, capture_output=True,
+                                   timeout=30, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+          assert version.stdout.startswith(b'OpenSSL ')
+          receipt = {'publisherSource': os.environ['GITHUB_SHA'], 'run': os.environ['GITHUB_RUN_ID'],
+              'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'runner': os.environ['RUNNER_NAME'],
+              'runnerGroup': 'rust', 'architecture': 'Linux ARM64', 'python': sys.version,
+              'pythonExecutable': sys.executable, 'tomllibImported': True,
+              'opensslPath': str(tool), 'opensslVersion': version.stdout.decode().strip(),
+              'opensslSha256': hashlib.sha256(tool.read_bytes()).hexdigest(),
+              'actualAppAuthenticationOrReleaseClaimed': False, 'runtimeChanged': False}
+          with (Path(os.environ['WORK']) / 'coordinator-runtime.json').open('x') as output:
+              json.dump(receipt, output, sort_keys=True, indent=2)
+              output.write('\n')
+          print('Existing ARM64 Python 3.11+ and /usr/bin/openssl CLI checks passed; receipt retained.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coordinator-runtime-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.private_job.outputs.directory }}/coordinator-runtime.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Identity-confined cleanup of runtime scratch only
+        if: always()
+        working-directory: jobs/desktop-releases-${{ github.run_id }}-${{ github.run_attempt }}-runtime
+        env:
+          WORK: ${{ steps.private_job.outputs.directory }}
+          IDENTITY: ${{ steps.private_job.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$WORK" publisher-jobs2 "$IDENTITY"
