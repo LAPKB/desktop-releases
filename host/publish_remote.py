@@ -963,7 +963,7 @@ def _validate_state(data, policy):
             raise PublicationError("publisher history ordering or uniqueness is invalid")
         seen.add(key)
         prev = key
-        contract._validate_source(record["source"], policy, app, channel, version)
+        contract._validate_source(record["source"], record_policy, app, channel, version)
         inventory = record["inventory"]
         if type(inventory) is not list or not 1 <= len(inventory) <= contract.MAX_FILES:
             raise PublicationError("publisher history inventory is invalid")
@@ -993,7 +993,7 @@ def _validate_state(data, policy):
         receipt = record["receipt"]
         receipt_fields = {"schema", "app", "channel", "version", "source",
                           "buildAttestationSha256", "manifestSha256", "signatureKeyId", "targets"}
-        if record["coverage"] in ("windows-x64", "launcher-desktop"):
+        if record["coverage"] != "full-six":
             receipt_fields.update(("coverage", "feed"))
         if record["distribution"] == "manual-checksum":
             receipt_fields.add("distribution")
@@ -1017,11 +1017,12 @@ def _validate_state(data, policy):
                 or hashlib.sha256(_canonical(receipt)).hexdigest() != record["receiptSha256"]):
             raise PublicationError("publisher history receipt scope/digest is invalid")
         by_name = {item["name"]: item for item in inventory}
-        metadata_names = {f"build-attestation-{version}.json", f"release-receipt-{version}.json", record["feed"]}
+        attestation_name, receipt_name = contract.metadata_names(version, record["coverage"])
+        metadata_names = {attestation_name, receipt_name, record["feed"]}
         if record["distribution"] == "signed":
-            metadata_names.update((f"build-attestation-{version}.json.sig", f"release-receipt-{version}.json.sig"))
-        for name, digest in ((f"build-attestation-{version}.json", record["buildAttestationSha256"]),
-                             (f"release-receipt-{version}.json", record["receiptSha256"]),
+            metadata_names.update((attestation_name + ".sig", receipt_name + ".sig"))
+        for name, digest in ((attestation_name, record["buildAttestationSha256"]),
+                             (receipt_name, record["receiptSha256"]),
                              (record["feed"], record["manifestSha256"])):
             if by_name.get(name, {}).get("sha256") != digest:
                 raise PublicationError("publisher history metadata is absent from its exact inventory")
@@ -1033,19 +1034,19 @@ def _validate_state(data, policy):
                 fields.update(("build", "windowsPayload"))
                 if record["distribution"] == "signed":
                     fields.add("installerSignature")
-            elif record["coverage"] == "launcher-desktop":
+            elif record["coverage"] in ("launcher-desktop", "macos-arm64"):
                 fields.add("build")
             if type(target_record) is not dict or set(target_record) != fields:
                 raise PublicationError("publisher history target record is malformed")
             identity = {"bundleIdentifier": contract.BUNDLE_IDS[app],
                         "displayName": contract.WINDOWS_PRODUCTS[app] if record["coverage"] in ("windows-x64", "launcher-desktop") else contract.DISPLAY_NAMES[app],
-                        "executable": policy.apps[app]["executable"], "architecture": target.split("-")[-1],
+                        "executable": record_policy.apps[app]["executable"], "architecture": target.split("-")[-1],
                         "version": version}
             if target_record["packageIdentity"] != identity:
                 raise PublicationError("publisher history package identity is inconsistent")
             if windows_proof:
                 contract._validate_windows_payload(target_record, app, version, identity["executable"])
-            elif record["coverage"] == "launcher-desktop":
+            elif record["coverage"] in ("launcher-desktop", "macos-arm64"):
                 contract._validate_build(target_record["build"])
             artifacts = target_record["artifacts"]
             if type(artifacts) is not list or not 1 <= len(artifacts) <= 8:
@@ -1058,7 +1059,7 @@ def _validate_state(data, policy):
                 if (type(name) is not str or name in artifacts_seen
                         or type(artifact["size"]) is not int or artifact["size"] < 1
                         or artifact["size"] > (128 * 1024 * 1024 if record["coverage"] == "launcher-desktop"
-                                                else 256 * 1024 * 1024 if record["coverage"] == "windows-x64" else contract.MAX_FILE_BYTES)
+                                                else 256 * 1024 * 1024 if record["coverage"] in ("windows-x64", "macos-arm64") else contract.MAX_FILE_BYTES)
                         or type(artifact["sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])):
                     raise PublicationError("publisher history artifact identity/size/hash is invalid")
                 profiles = record_policy.apps[app]["channels"][channel]["profiles"][target]
@@ -1765,6 +1766,16 @@ def _check_versions(state, incoming):
                  and record["version"] == incoming["version"]), None)
     if same is not None and same != incoming:
         raise PublicationError("same-version release conflicts with durable publication history")
+    # Independent app feeds may share one version only from the same immutable
+    # source and successful producer attempt. This is not version overwrite.
+    if incoming["app"] != "launcher" and incoming["coverage"] in ("macos-arm64", "windows-x64"):
+        for record in state["history"]:
+            if (record["app"] == incoming["app"] and record["channel"] == incoming["channel"]
+                    and record["version"] == incoming["version"] and record["coverage"] != incoming["coverage"]):
+                builds = [t.get("build") for t in record["receipt"]["targets"].values()]
+                incoming_builds = [t.get("build") for t in incoming["receipt"]["targets"].values()]
+                if record["source"] != incoming["source"] or not builds or any(b != builds[0] for b in builds + incoming_builds):
+                    raise PublicationError("same app version across feeds requires identical source/run/attempt")
     currents = list(_latest_by_app_channel(state).values())
     if state["historical"]:
         currents.extend({**item, "targets": [item["target"]], "versionTuple": list(_version_tuple(item["version"]))}

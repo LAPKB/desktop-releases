@@ -20,6 +20,8 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -257,6 +259,58 @@ def _fetch_exact(url, policy, maximum, expected=None):
         return bytes(body) if body is not None else {"size": total, "sha256": digest.hexdigest()}
 
 
+class _InstallerLinks(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            hrefs = [value for key, value in attrs if key == "href"]
+            if len(hrefs) != 1 or type(hrefs[0]) is not str:
+                raise ContractError("downloads page contains an ambiguous installer link")
+            self.links.append(hrefs[0])
+        if tag == "base":
+            raise ContractError("downloads page must not redirect relative installer links")
+
+
+def _verify_catalog_page(policy, release):
+    catalog_bytes = _fetch_exact(f"{policy.origin}/downloads/catalog.json", policy,
+                                 publish_remote.MAX_CATALOG_BYTES)
+    catalog = contract.strict_json(catalog_bytes, publish_remote.MAX_CATALOG_BYTES, "served downloads catalog")
+    if type(catalog) is not dict or catalog.get("schema") != "lapkb-downloads-v1":
+        raise ContractError("served downloads catalog schema is invalid")
+    try:
+        entry = catalog["apps"][release["app"]]["channels"][release["channel"]]
+        links = []
+        for target, record in release["receipt"]["targets"].items():
+            installers = record["roles"]["installer"]
+            current = {"version": release["version"], "feed": release["feed"],
+                       "distribution": release["distribution"], "files": installers}
+            if entry["targets"][target] != current:
+                raise ContractError("website current target/version/feed/installer mapping differs from release")
+            for artifact in record["artifacts"]:
+                expected = {k: artifact[k] for k in ("sha256", "size", "kind", "roles")}
+                expected.update(target=target, version=release["version"], distribution=release["distribution"])
+                if entry["files"][artifact["name"]] != expected:
+                    raise ContractError("website catalog filename mapping differs from signed package bytes")
+            links.extend(f"/downloads/{release['app']}/{release['channel']}/{name}" for name in installers)
+    except (KeyError, TypeError) as error:
+        raise ContractError("website catalog is missing current release installer mappings") from error
+    page_bytes = _fetch_exact(f"{policy.origin}/downloads/index.html", policy, publish_remote.MAX_INDEX_BYTES)
+    landing = _fetch_exact(f"{policy.origin}/downloads/", policy, publish_remote.MAX_INDEX_BYTES)
+    if landing != page_bytes:
+        raise ContractError("downloads landing page differs from the maintained downloads page")
+    parser = _InstallerLinks()
+    try:
+        parser.feed(page_bytes.decode("utf-8", "strict"))
+        parser.close()
+    except UnicodeError as error:
+        raise ContractError("downloads page is not UTF-8") from error
+    if any(parser.links.count(link) != 1 for link in links):
+        raise ContractError("downloads page is missing or duplicates a current installer link")
+
+
 def _verify_served(policy, release, result):
     contract.validate_publication_result(result, policy, release)
     expected_inventory = release["inventory"]
@@ -269,6 +323,19 @@ def _verify_served(policy, release, result):
                               None if name == feed else item)
         if name == feed and served != release["manifestBytes"]:
             raise ContractError("served fixed coverage feed differs from the exact canonical manifest")
+    _verify_catalog_page(policy, release)
+    if release["coverage"] == "macos-arm64":
+        configured = policy.apps[release["app"]]["channels"][release["channel"]]["macFeedUrl"]
+        parsed = urlsplit(configured)
+        reader_policy = replace(policy, origin=f"{parsed.scheme}://{parsed.netloc}")
+        served = _fetch_exact(configured, reader_policy, 64 * 1024)
+        if served != release["manifestBytes"]:
+            raise ContractError("current compiled Mac reader feed differs from exact signed release bytes")
+        parent = configured.rsplit("/", 1)[0]
+        for entry in release["receipt"]["targets"].values():
+            item = next(a for a in entry["artifacts"] if a["name"] == entry["roles"]["updater"])
+            _fetch_exact(f"{parent}/{item['name']}", reader_policy, 256 * 1024 * 1024,
+                         {"size": item["size"], "sha256": item["sha256"]})
     alias = release["legacy"]
     if alias is not None:
         legacy_manifest = _fetch_exact(f"{policy.origin}/{alias}/latest.json", policy,
@@ -359,6 +426,9 @@ def publish(app, channel, bundle_dir, verifier=contract.VERIFIER_PATH):
             "targets": release["targets"], "distribution": release["distribution"],
             "status": result["status"], "inventoryDigest": release["inventoryDigest"],
             "files": len(release["inventory"]),
+            "publicLinks": {"downloads": f"{policy.origin}/downloads/", "feed": (policy.apps[app]["channels"][channel]["macFeedUrl"] if release["coverage"] == "macos-arm64" else f"{policy.origin}/downloads/{app}/{channel}/{release['feed']}"),
+                "installers": [f"{policy.origin}/downloads/{app}/{channel}/{name}"
+                    for entry in release["receipt"]["targets"].values() for name in entry["roles"]["installer"]]},
         }
         print(json.dumps(response, sort_keys=True, separators=(",", ":")))
         return response

@@ -40,7 +40,7 @@ RUN --network=none set -eu; \
     install -d /out; \
     cp host/verifier/target/release/lapkb-release-verifier /out/lapkb-release-verifier; \
     (cd /out && sha256sum lapkb-release-verifier > lapkb-release-verifier.sha256); \
-    printf 'publisher-source=%s\nrun=%s\nattempt=%s\nnative-linux-architecture=%s\nchecks=metadata schemas, verifier, synthetic publisher/client/pickup regressions\nnetwork=none during all checks\nproduct-signing-publication-native-Windows=not performed\n' \
+    printf 'publisher-source=%s\nrun=%s\nattempt=%s\nnative-linux-architecture=%s\nchecks=metadata schemas, verifier, isolated publisher/client/pickup and automatic release response/archive/crypto/history/retry/page regressions\nnetwork=none during all checks\nproduct-signing-publication-native-Windows=not performed\n' \
       "$PUBLISHER_SOURCE_SHA" "$PUBLISHER_RUN_ID" "$PUBLISHER_RUN_ATTEMPT" "$TARGETARCH" > /out/publisher-checks.txt
 FROM scratch AS ci-evidence
 COPY --from=publisher-tests /out/ /

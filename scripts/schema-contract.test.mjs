@@ -152,6 +152,32 @@ test("full-six still requires six targets, with no Windows-only payload relabeli
   rejects("build-attestation", full);
 });
 
+test("honest Mac ARM64 app scope shares the signed protocol, not a fabricated six-target release", () => {
+  const tarName = `papir-0.1.5-darwin-aarch64-${hash}.app.tar.gz`;
+  const dmgName = `papir-0.1.5-darwin-aarch64-${hash}.dmg`;
+  const macIdentity = { ...identity, architecture: "aarch64" };
+  const tar = { ...artifact, name: tarName, kind: "app-tar-gz", roles: ["updater"] };
+  const dmg = { ...artifact, name: dmgName, kind: "dmg", roles: ["installer"], signatureKeyId: null, updaterSignature: null };
+  const mac = { ...attestation, coverage: "macos-arm64", targets: { "darwin-aarch64": { packageIdentity: macIdentity, artifacts: [tar, dmg], build } } };
+  const { updaterSignature: _tarSignature, ...tarReceipt } = tar;
+  const { updaterSignature: _dmgSignature, ...dmgReceipt } = dmg;
+  const macReceipt = { ...receipt, coverage: "macos-arm64", feed: "latest.json", targets: { "darwin-aarch64": { packageIdentity: macIdentity, artifacts: [tarReceipt, dmgReceipt], build, roles: { installer: [dmgName], updater: tarName } } } };
+  accepts("build-attestation", mac);
+  accepts("release-receipt", macReceipt);
+  rejects("release-receipt", { ...macReceipt, feed: "latest-windows.json" });
+  rejects("build-attestation", { ...mac, app: "launcher" });
+  for (const name of ["build-attestation", "release-receipt"]) {
+    const original = name === "build-attestation" ? mac : macReceipt;
+    for (const change of [
+      (v) => { v.targets["windows-x86_64"] = v.targets["darwin-aarch64"]; },
+      (v) => { delete v.targets["darwin-aarch64"].build; },
+      (v) => { v.targets["darwin-aarch64"].artifacts[0].size = 268435457; },
+      (v) => { v.source.commit = "a".repeat(64); },
+      (v) => { v.distribution = "manual-checksum"; },
+    ]) { const changed = structuredClone(original); change(changed); rejects(name, changed); }
+  }
+});
+
 test("publisher trust permits only configured known channels and explicit Windows profiles", () => {
   const apps = {};
   const legacyAliases = {};
@@ -171,6 +197,19 @@ test("publisher trust permits only configured known channels and explicit Window
     "darwin-aarch64": [{ id: "app-tar", extension: "app.tar.gz", kind: "app-tar-gz", roles: ["installer", "updater"], required: true }],
   } };
   accepts("publisher-trust", desktop);
+  desktop.apps.launcher.retainedSourceRecords = [hash];
+  for (const app of ["papir", "bestdose", "bdautodial", "checkerboard"]) {
+    desktop.apps[app].allowedCoverages = ["macos-arm64", "windows-x64"];
+    desktop.apps[app].channels.stable.profiles["darwin-aarch64"] = structuredClone(desktop.apps.launcher.channels.stable.profiles["darwin-aarch64"]);
+    desktop.apps[app].channels.stable.macFeedUrl = `https://downloads.example.test/downloads/${app}/stable/latest.json`;
+  }
+  accepts("publisher-trust", desktop);
+  const missingMac = structuredClone(desktop); delete missingMac.apps.papir.channels.stable.macFeedUrl;
+  rejects("publisher-trust", missingMac);
+  const fakeMac = structuredClone(desktop); fakeMac.apps.papir.allowedCoverages = ["macos-arm64"];
+  rejects("publisher-trust", fakeMac);
+  const badPin = structuredClone(desktop); badPin.apps.launcher.retainedSourceRecords = ["not a durable-record hash"];
+  rejects("publisher-trust", badPin);
   for (const change of [
     (v) => { v.apps.launcher.retainedManualRecords["0.1.11"] = hash; },
     (v) => { v.apps.papir.retainedManualRecords = { "0.1.9": hash }; },

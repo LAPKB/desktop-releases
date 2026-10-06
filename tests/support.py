@@ -54,7 +54,7 @@ class SyntheticSigner:
         self.process.stderr.close()
 
 
-def make_trust(root: Path, public_key: str, key_id: str, *, windows_only=False):
+def make_trust(root: Path, public_key: str, key_id: str, *, windows_only=False, desktop=False):
     aliases = {
         app: {"stable": app, "beta": None}
         for app in contract.APP_IDS
@@ -89,12 +89,24 @@ def make_trust(root: Path, public_key: str, key_id: str, *, windows_only=False):
                     "roles": ["installer"] if manual else ["installer", "updater"], "required": True}]},
             }}
             aliases[app] = {"stable": app}
+    if desktop:
+        for app, entry in apps.items():
+            entry["allowedCoverages"] = ["launcher-desktop"] if app == "launcher" else ["macos-arm64", "windows-x64"]
+            entry["channels"] = {"stable": {
+                "publicKey": public_key, "keyId": key_id,
+                "profiles": {"darwin-aarch64": [
+                    {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": True},
+                    {"id": "updater", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": True}],
+                    "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": True}]}}}
+            aliases[app] = {"stable": app if app in ("launcher", "papir") else None}
+            if app != "launcher":
+                entry["channels"]["stable"]["macFeedUrl"] = ("https://mac-feed.example.test/papir/latest.json" if app == "papir" else f"https://downloads.example.test/downloads/{app}/stable/latest.json")
     raw = {
         "schema": "lapkb-publisher-trust-v1",
         "root": str(root),
         "origin": "https://downloads.example.test",
         "pickupRepository": PICKUP_REPOSITORY,
-        "checkmateMinimumVersion": "0.8.0" if windows_only else "1.0.0",
+        "checkmateMinimumVersion": "0.8.0" if windows_only or desktop else "1.0.0",
         "legacyAliases": aliases,
         "apps": apps,
     }
@@ -106,7 +118,7 @@ def canonical(value):
                       allow_nan=False).encode("utf-8")
 
 
-def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable",
+def make_bundle(signer: SyntheticSigner | None, policy, app="launcher", channel="stable",
                 version="1.2.3", *, nonce="same", omit_target=None,
                 omit_profile=None, include_optional=False, coverage="full-six"):
     app_policy = policy.apps[app]
@@ -164,7 +176,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
                     "installMode": "currentUser", "files": [{"path": app_policy["executable"] + ".exe",
                         "size": len(executable_bytes), "sha256": hashlib.sha256(executable_bytes).hexdigest()}]},
             )
-        elif coverage == "launcher-desktop":
+        elif coverage in ("launcher-desktop", "macos-arm64"):
             targets[target]["build"] = {"runId": "12345", "runAttempt": 1, "profile": "public-staging"}
 
     attestation = {
@@ -174,7 +186,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
         "pub_date": "2026-09-25T00:00:00Z",
         "targets": targets,
     }
-    if coverage in ("windows-x64", "launcher-desktop"):
+    if coverage != "full-six":
         attestation["coverage"] = coverage
     if manual:
         attestation["distribution"] = "manual-checksum"
@@ -182,8 +194,7 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
         attestation["targets"].pop(omit_target, None)
     attestation_bytes = canonical(attestation)
     attestation_signature = None if manual else signer.sign(attestation_bytes)
-    attestation_name = f"build-attestation-{version}.json"
-    receipt_name = f"release-receipt-{version}.json"
+    attestation_name, receipt_name = contract.metadata_names(version, coverage)
     files[attestation_name] = attestation_bytes
     if not manual:
         files[attestation_name + ".sig"] = attestation_signature
@@ -209,43 +220,12 @@ def make_bundle(signer: SyntheticSigner, policy, app="launcher", channel="stable
     if manual:
         manifest.update(schema="lapkb-manual-download-v1", app=app, channel=channel,
                         coverage=coverage, distribution="manual-checksum")
-    manifest_bytes = canonical(manifest)
-    feed = "latest-windows.json" if coverage == "windows-x64" else "latest.json"
+    # Valid fixture bytes use the same maintained canonical builders as the
+    # coordinator. Deliberately missing-target fixtures keep their wrong feed.
+    manifest_bytes = canonical(manifest) if omit_target is not None and omit_profile is None else contract._expected_manifest(policy, app, channel, version, attestation)
+    feed = contract.feed_for_coverage(coverage)
     files[feed] = manifest_bytes
-
-    receipt_targets = {}
-    for target in selected_targets:
-        if target not in targets:
-            continue
-        records = targets[target]["artifacts"]
-        receipt_targets[target] = {
-            "packageIdentity": targets[target]["packageIdentity"],
-            "roles": {
-                "installer": sorted(item["name"] for item in records if "installer" in item["roles"]),
-                "updater": next((item["name"] for item in records if "updater" in item["roles"]), None),
-            },
-            "artifacts": [
-                {key: item[key] for key in ("name", "kind", "roles", "size", "sha256", "signatureKeyId")}
-                for item in records
-            ],
-        }
-        if target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop"):
-            receipt_targets[target].update(build=targets[target]["build"], windowsPayload=targets[target]["windowsPayload"])
-            if not manual:
-                receipt_targets[target]["installerSignature"] = next(item["updaterSignature"] for item in records if "updater" in item["roles"])
-        elif coverage == "launcher-desktop":
-            receipt_targets[target]["build"] = targets[target]["build"]
-    receipt = {
-        "schema": "release-receipt-v1", "app": app, "channel": channel, "version": version,
-        "source": source,
-        "buildAttestationSha256": hashlib.sha256(attestation_bytes).hexdigest(),
-        "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
-        "signatureKeyId": None if manual else signer.key_id, "targets": receipt_targets,
-    }
-    if coverage in ("windows-x64", "launcher-desktop"):
-        receipt.update(coverage=coverage, feed=feed)
-    if manual:
-        receipt["distribution"] = "manual-checksum"
+    receipt = contract._expected_receipt(policy, app, channel, version, attestation, manifest_bytes)
     receipt_bytes = canonical(receipt)
     files[receipt_name] = receipt_bytes
     if not manual:

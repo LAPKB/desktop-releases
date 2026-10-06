@@ -1,101 +1,308 @@
-name: Publish download artifact
+name: Release desktop app
+run-name: Release ${{ inputs.app }} (${{ inputs.mode }})
 
-# Called by product repositories after they have built (and, where applicable,
-# signed) a release artifact. Validates and publishes through the shared
-# download origin; holds the only copy of the publisher credential.
-
+# The sole release frontdoor. Pushes validate in validate.yml, never publish.
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       app:
-        description: Product id, e.g. launcher, papir, bestdose, bdautodial
+        description: Desktop app
         required: true
-        type: string
-      channel:
-        description: Release channel
-        required: false
-        default: stable
-        type: string
-      version:
-        description: Semantic version being published
+        type: choice
+        options: [launcher, papir, bestdose, bdautodial, checkerboard]
+      mode:
+        description: Main release, or approved pre-main integration test
         required: true
-        type: string
-      artifact-file:
-        description: Release artifact file name inside the downloaded artifact
-        required: true
-        type: string
-      manifest-file:
-        description: Signed release manifest file name inside the downloaded artifact
-        required: true
-        type: string
-      artifact-name:
-        description: Uploaded workflow artifact holding both files
-        required: true
-        type: string
-      legacy-path:
-        description: Previously compiled manifest path that must keep serving identical bytes
-        required: false
-        default: ''
-        type: string
-    secrets:
-      PUBLISH_SSH_KEY:
-        description: Deploy key restricted to the download origin directory
-        required: true
-      PUBLISH_KNOWN_HOSTS:
-        description: Pinned host key for the download origin
-        required: true
+        type: choice
+        options: [main, integration]
+        default: main
 
 permissions:
   contents: read
+  actions: read
+
+# Shared across main/integration, including retries. Never cancel a writer.
+concurrency:
+  group: desktop-release-${{ inputs.app }}-stable
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  GIT_TERMINAL_PROMPT: "0"
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  plan:
+    name: Resolve source and version
+    if: >-
+      github.repository == 'LAPKB/desktop-releases' &&
+      github.event_name == 'workflow_dispatch' &&
+      ((inputs.mode == 'main' && github.ref == 'refs/heads/main') ||
+      (inputs.mode == 'integration' && github.ref == 'refs/heads/launcher'))
+    runs-on:
+      group: Default
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    outputs:
+      recovery: ${{ steps.plan.outputs.recovery }}
+      fresh: ${{ steps.plan.outputs.fresh }}
+      intent_name: ${{ steps.plan.outputs.intent_name }}
+      bundle_name: ${{ steps.plan.outputs.bundle_name }}
+      result_name: ${{ steps.plan.outputs.result_name }}
+      version: ${{ steps.plan.outputs.version }}
+      source: ${{ steps.plan.outputs.source }}
+    steps:
+      - name: Check out immutable publisher source explicitly
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: LAPKB/desktop-releases
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: publisher-${{ github.run_id }}-${{ github.run_attempt }}-plan
+      - name: Create identity-bound private workspace
+        id: private
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-plan
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/desktop-release.XXXXXXXXXX")"
+          work="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$work")"
+          chmod 700 "$work"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$work")"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$work" desktop-release "$identity"
+          printf 'directory=%s\nidentity=%s\n' "$work" "$identity" >> "$GITHUB_OUTPUT"
+      - name: Resolve selected trusted branch once and derive coherent version
+        id: plan
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_PAPIR_SIGNING_KID: ${{ vars.RELEASE_PAPIR_SIGNING_KID }}
+          RELEASE_PAPIR_SIGNING_PUBLIC_KEY: ${{ vars.RELEASE_PAPIR_SIGNING_PUBLIC_KEY }}
+          APP: ${{ inputs.app }}
+          MODE: ${{ inputs.mode }}
+          WORK: ${{ steps.private.outputs.directory }}
+        run: python3 scripts/release_desktop.py plan --app "$APP" --mode "$MODE" --workspace "$WORK"
+      - name: Retain source plan only (no credentials)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.private.outputs.directory }}/plan.json
+            ${{ steps.private.outputs.directory }}/action.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove this private workspace only
+        if: always()
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-plan
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+          IDENTITY: ${{ steps.private.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$WORK" desktop-release "$IDENTITY"
+
+  authorize:
+    name: Authorize and check setup before builds
+    needs: plan
+    environment: ${{ inputs.mode == 'main' && 'desktop-release-main' || 'desktop-release-integration' }}
+    runs-on:
+      group: Default
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 15
     env:
+      RELEASE_PUBLISHER_POLICY: ${{ vars.RELEASE_PUBLISHER_POLICY }}
+      RELEASE_RECEIVER_POLICY_SHA256: ${{ vars.RELEASE_RECEIVER_POLICY_SHA256 }}
+      RELEASE_VERIFIER_PATH: ${{ vars.RELEASE_VERIFIER_PATH }}
+      RELEASE_VERIFIER_SHA256: ${{ vars.RELEASE_VERIFIER_SHA256 }}
+      RELEASE_SIGNER_PATH: ${{ vars.RELEASE_SIGNER_PATH }}
+      RELEASE_SIGNER_SHA256: ${{ vars.RELEASE_SIGNER_SHA256 }}
+      APP_SIGNING_KEY: ${{ inputs.app == 'launcher' && secrets.LAUNCHER_UPDATER_PRIVATE_KEY || inputs.app == 'papir' && secrets.PAPIR_UPDATER_PRIVATE_KEY || inputs.app == 'bestdose' && secrets.BESTDOSE_UPDATER_PRIVATE_KEY || inputs.app == 'bdautodial' && secrets.BDAUTODIAL_UPDATER_PRIVATE_KEY || inputs.app == 'checkerboard' && secrets.CHECKMATE_UPDATER_PRIVATE_KEY }}
+      PUBLISH_SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
+      PUBLISH_KNOWN_HOSTS: ${{ secrets.PUBLISH_KNOWN_HOSTS }}
       LAPKB_PUBLISH_HOST: ${{ vars.LAPKB_DOWNLOAD_HOST }}
       LAPKB_PUBLISH_USER: ${{ vars.LAPKB_DOWNLOAD_USER }}
-      LAPKB_PUBLISH_ROOT: ${{ vars.LAPKB_DOWNLOAD_ROOT }}
-      LAPKB_PUBLISH_ORIGIN: ${{ vars.LAPKB_DOWNLOAD_ORIGIN }}
-      LAPKB_PUBLISH_KEY: ${{ github.workspace }}/lapkb-publish-key
+      LAPKB_PUBLISH_PORT: ${{ vars.LAPKB_DOWNLOAD_PORT || '22' }}
+      LAPKB_PUBLISH_HOST_KEY_ALIAS: ${{ vars.LAPKB_DOWNLOAD_HOST_KEY_ALIAS }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          repository: LAPKB/desktop-releases
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          path: publisher-${{ github.run_id }}-${{ github.run_attempt }}-authorize
+      - name: Create identity-bound private workspace
+        id: private
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-authorize
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/desktop-release.XXXXXXXXXX")"
+          work="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$work")"
+          chmod 700 "$work"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$work")"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$work" desktop-release "$identity"
+          printf 'directory=%s\nidentity=%s\n' "$work" "$identity" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.artifact-name }}
-          path: incoming
-      - name: Install the restricted publisher key
+          name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.private.outputs.directory }}
+      - name: Fail early on policy, existing key, native tools, host pin or version errors
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-authorize
         env:
-          PUBLISH_SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
-          PUBLISH_KNOWN_HOSTS: ${{ secrets.PUBLISH_KNOWN_HOSTS }}
-        run: |
-          set -eu
-          printf '%s\n' "$PUBLISH_SSH_KEY" > "$LAPKB_PUBLISH_KEY"
-          chmod 0600 "$LAPKB_PUBLISH_KEY"
-          install -d -m 0700 ~/.ssh
-          printf '%s\n' "$PUBLISH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 0600 ~/.ssh/known_hosts
-      - name: Validate the artifact set
-        run: |
-          set -eu
-          printf '%s\n' "${{ inputs.version }}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-          test -s "incoming/${{ inputs.artifact-file }}"
-          test -s "incoming/${{ inputs.manifest-file }}"
-          for name in LAPKB_PUBLISH_HOST LAPKB_PUBLISH_USER LAPKB_PUBLISH_ROOT LAPKB_PUBLISH_ORIGIN; do
-            test -n "$(printenv "$name")" || { echo "missing repository variable: $name" >&2; exit 1; }
-          done
-      - name: Publish and verify through the public origin
-        run: |
-          set -eu
-          python3 scripts/publish_artifact.py \
-            --app "${{ inputs.app }}" \
-            --channel "${{ inputs.channel }}" \
-            --version "${{ inputs.version }}" \
-            --artifact "incoming/${{ inputs.artifact-file }}" \
-            --manifest "incoming/${{ inputs.manifest-file }}" \
-            ${{ inputs.legacy-path != '' && format('--legacy {0}', inputs.legacy-path) || '' }}
-      - name: Remove the publisher key
+          WORK: ${{ steps.private.outputs.directory }}
+        run: python3 scripts/release_desktop.py authorize --workspace "$WORK"
+      - name: Remove all private credentials and scratch files
         if: always()
-        run: rm -f "$LAPKB_PUBLISH_KEY"
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-authorize
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+          IDENTITY: ${{ steps.private.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$WORK" desktop-release "$IDENTITY"
+
+  build:
+    name: Build qualified candidates
+    needs: [plan, authorize]
+    runs-on:
+      group: Default
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 225
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: LAPKB/desktop-releases
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: publisher-${{ github.run_id }}-${{ github.run_attempt }}-build
+      - name: Create identity-bound private workspace
+        id: private
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-build
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/desktop-release.XXXXXXXXXX")"
+          work="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$work")"
+          chmod 700 "$work"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$work")"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$work" desktop-release "$identity"
+          printf 'directory=%s\nidentity=%s\n' "$work" "$identity" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.private.outputs.directory }}
+      - name: Persist release intent before any dispatch
+        if: needs.plan.outputs.fresh == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ needs.plan.outputs.intent_name }}
+          path: ${{ steps.private.outputs.directory }}/plan.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Dispatch once, join exact successful jobs and collect both original targets
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-build
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          WORK: ${{ steps.private.outputs.directory }}
+        run: python3 scripts/release_desktop.py build --workspace "$WORK"
+      - name: Retain complete original candidate inputs and exact CI evidence
+        if: needs.plan.outputs.recovery != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.private.outputs.directory }}/candidates
+            ${{ steps.private.outputs.directory }}/built-plan.json
+            ${{ steps.private.outputs.directory }}/build-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove this private workspace only
+        if: always()
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-build
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+          IDENTITY: ${{ steps.private.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$WORK" desktop-release "$IDENTITY"
+
+  release:
+    name: Sign, publish and verify
+    needs: [plan, authorize, build]
+    environment: ${{ inputs.mode == 'main' && 'desktop-release-main' || 'desktop-release-integration' }}
+    runs-on:
+      group: Default
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 100
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_PUBLISHER_POLICY: ${{ vars.RELEASE_PUBLISHER_POLICY }}
+      RELEASE_RECEIVER_POLICY_SHA256: ${{ vars.RELEASE_RECEIVER_POLICY_SHA256 }}
+      RELEASE_VERIFIER_PATH: ${{ vars.RELEASE_VERIFIER_PATH }}
+      RELEASE_VERIFIER_SHA256: ${{ vars.RELEASE_VERIFIER_SHA256 }}
+      RELEASE_SIGNER_PATH: ${{ vars.RELEASE_SIGNER_PATH }}
+      RELEASE_SIGNER_SHA256: ${{ vars.RELEASE_SIGNER_SHA256 }}
+      APP_SIGNING_KEY: ${{ inputs.app == 'launcher' && secrets.LAUNCHER_UPDATER_PRIVATE_KEY || inputs.app == 'papir' && secrets.PAPIR_UPDATER_PRIVATE_KEY || inputs.app == 'bestdose' && secrets.BESTDOSE_UPDATER_PRIVATE_KEY || inputs.app == 'bdautodial' && secrets.BDAUTODIAL_UPDATER_PRIVATE_KEY || inputs.app == 'checkerboard' && secrets.CHECKMATE_UPDATER_PRIVATE_KEY }}
+      PUBLISH_SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
+      PUBLISH_KNOWN_HOSTS: ${{ secrets.PUBLISH_KNOWN_HOSTS }}
+      LAPKB_PUBLISH_HOST: ${{ vars.LAPKB_DOWNLOAD_HOST }}
+      LAPKB_PUBLISH_USER: ${{ vars.LAPKB_DOWNLOAD_USER }}
+      LAPKB_PUBLISH_PORT: ${{ vars.LAPKB_DOWNLOAD_PORT || '22' }}
+      LAPKB_PUBLISH_HOST_KEY_ALIAS: ${{ vars.LAPKB_DOWNLOAD_HOST_KEY_ALIAS }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: LAPKB/desktop-releases
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: publisher-${{ github.run_id }}-${{ github.run_attempt }}-release
+      - name: Create identity-bound private workspace
+        id: private
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-release
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/desktop-release.XXXXXXXXXX")"
+          work="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$work")"
+          chmod 700 "$work"
+          identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$work")"
+          python3 scripts/ci/owned-temp-dir.py validate "$RUNNER_TEMP" "$work" desktop-release "$identity"
+          printf 'directory=%s\nidentity=%s\n' "$work" "$identity" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.private.outputs.directory }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: needs.plan.outputs.recovery != 'true'
+        with:
+          name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.private.outputs.directory }}
+      - name: Prepare canonical bundles or recover identical retained signed bytes
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-release
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+        run: python3 scripts/release_desktop.py prepare --workspace "$WORK"
+      - name: Retain exact signed bundles before the writer
+        if: needs.plan.outputs.recovery != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ needs.plan.outputs.bundle_name }}
+          path: ${{ steps.private.outputs.directory }}/bundle/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish through receive-v1 and verify both public feeds, files, catalog and page
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-release
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+        run: python3 scripts/release_desktop.py publish --workspace "$WORK"
+      - name: Retain real publication/reconciliation results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ needs.plan.outputs.result_name }}
+          path: ${{ steps.private.outputs.directory }}/publication-evidence/
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Remove all private credentials and scratch files
+        if: always()
+        working-directory: publisher-${{ github.run_id }}-${{ github.run_attempt }}-release
+        env:
+          WORK: ${{ steps.private.outputs.directory }}
+          IDENTITY: ${{ steps.private.outputs.identity }}
+        run: python3 scripts/ci/owned-temp-dir.py cleanup "$RUNNER_TEMP" "$WORK" desktop-release "$IDENTITY"

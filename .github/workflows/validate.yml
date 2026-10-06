@@ -2,7 +2,9 @@ name: Validate desktop release metadata
 
 on:
   push:
-    branches: [launcher]
+    branches: [main, launcher]
+  pull_request:
+    branches: [main, launcher]
   workflow_dispatch:
     inputs:
       runner_arch:
@@ -16,7 +18,11 @@ permissions:
 
 jobs:
   validate:
-    if: github.repository == 'LAPKB/desktop-releases' && github.ref == 'refs/heads/launcher'
+    if: >-
+      github.repository == 'LAPKB/desktop-releases' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/launcher' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository))
     runs-on:
       group: ${{ inputs.runner_arch == 'ARM64' && 'rust' || 'Default' }}
       labels: [self-hosted, Linux, "${{ inputs.runner_arch || 'X64' }}"]

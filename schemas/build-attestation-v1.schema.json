@@ -10,7 +10,7 @@
     "app": {"enum": ["launcher", "papir", "bestdose", "bdautodial", "checkerboard"]},
     "channel": {"enum": ["stable", "beta"]},
     "version": {"$ref": "#/$defs/version"},
-    "coverage": {"enum": ["full-six", "windows-x64", "launcher-desktop"]},
+    "coverage": {"enum": ["full-six", "windows-x64", "launcher-desktop", "macos-arm64"]},
     "distribution": {"const": "manual-checksum"},
     "source": {"$ref": "#/$defs/source"},
     "notes": {"type": "string", "maxLength": 16384},
@@ -57,7 +57,16 @@
             "windows-x86_64": {"allOf": [{"$ref": "#/$defs/windows-target"}, {"type": "object", "properties": {"artifacts": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/signed-nsis"}, {"type": "object", "properties": {"size": {"type": "integer", "maximum": 134217728}}}]}}}}]}
           }}
       }},
-      "else": {"properties": {"distribution": false, "targets": {"$ref": "#/$defs/full-six-targets"}}}
+      "else": {
+        "if": {"required": ["coverage"], "properties": {"coverage": {"const": "macos-arm64"}}},
+        "then": {"properties": {
+          "app": {"enum": ["papir", "bestdose", "bdautodial", "checkerboard"]}, "channel": {"const": "stable"}, "distribution": false,
+          "source": {"type": "object", "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}},
+          "notes": {"type": "string", "maxLength": 4096},
+          "targets": {"type": "object", "additionalProperties": false, "required": ["darwin-aarch64"], "properties": {"darwin-aarch64": {"$ref": "#/$defs/app-macos-target"}}}
+        }},
+        "else": {"properties": {"distribution": false, "targets": {"$ref": "#/$defs/full-six-targets"}}}
+      }
     }
   }],
   "$defs": {
@@ -137,6 +146,16 @@
         "packageIdentity": {"allOf": [{"$ref": "#/$defs/identity"}, {"type": "object", "properties": {"architecture": {"const": "aarch64"}}}]},
         "artifacts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"allOf": [{"$ref": "#/$defs/artifact"}, {"type": "object", "properties": {
           "size": {"type": "integer", "maximum": 134217728}, "updaterSignature": {"anyOf": [{"type": "null"}, {"type": "string", "maxLength": 16384}]}
+        }}]}},
+        "build": {"$ref": "#/$defs/windows-build"}
+      }
+    },
+    "app-macos-target": {
+      "type": "object", "additionalProperties": false, "required": ["packageIdentity", "artifacts", "build"],
+      "properties": {
+        "packageIdentity": {"allOf": [{"$ref": "#/$defs/identity"}, {"type": "object", "properties": {"architecture": {"const": "aarch64"}}}]},
+        "artifacts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"allOf": [{"$ref": "#/$defs/artifact"}, {"type": "object", "properties": {
+          "size": {"type": "integer", "maximum": 268435456}, "updaterSignature": {"anyOf": [{"type": "null"}, {"type": "string", "maxLength": 16384}]}
         }}]}},
         "build": {"$ref": "#/$defs/windows-build"}
       }

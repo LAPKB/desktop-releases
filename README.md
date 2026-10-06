@@ -5,6 +5,28 @@ genuine SDK Permits, device binding and application authorization are separate.
 This repository publishes release metadata and immutable assets; it does not
 implement another updater, installer worker or authorization service.
 
+## Release a desktop app (project managers)
+
+1. In **LAPKB/desktop-releases → Actions → Release desktop app**, choose the app.
+2. Use publisher branch `main` and mode `main`, then **Run workflow**. Before
+   main rollout, the authorized test route is branch `launcher`, mode `integration`;
+   it uses only the five hard-coded product integration branches, not an arbitrary ref.
+3. A green release summary shows the derived version, exact source commit and
+   verified public feed/installer/download links for **Mac ARM64 + Windows x64**.
+
+That is the whole normal procedure: no supplied version/hash/key, artifact copy,
+manual signing, release-branch push, packet script or operator publication.
+Ordinary pushes validate only; PRs, tags and untrusted refs cannot publish. Both
+qualified producer jobs/tests must succeed before either app feed advances.
+A failed/interrupted run can be re-run to reconcile its exact retained signed
+bundle or dispatch intent. It cannot blindly rebuild/re-sign a public version.
+
+Administrator authorization/setup is separate: [one-time setup](docs/release-setup.md).
+Missing configuration, moved source branches, incoherent/already-published
+versions and incomplete/ambiguous/expired evidence stop the run, not weaken trust.
+Do not open a PR until actual automated build → sign → publish → public reader/
+feed/page evidence succeeds. Fixture CI or a queued build is not that acceptance.
+
 ## Launcher manual-to-signed transition
 
 From bootstrap 0.1.11 fresh Launcher updates require the dedicated approved
@@ -17,15 +39,16 @@ Uploads, plans and fresh releases cannot select that acceptance. Do not reset,
 delete, rewrite, relabel or re-sign history. A separately published 0.1.10 must
 be observed and pinned exactly before activating the signed policy.
 
-All other app trust, assets, feeds, signatures, history and observed Mac archives
-remain unchanged. Reuse the installed native verifier: the signature format did
+Existing app keys, public assets, signatures, history and observed Mac archives
+remain unchanged. New Mac app qualification requires the separately approved
+receiver/policy deployment described in setup; source code alone does not activate it. Reuse the installed native verifier: the signature format did
 not change. Apply the maintained receiver/contract and protected policy only
 after the focused existing CI regressions pass; never replay activation or
 historical initialization.
 
 ## One release contract and writer
 
-The workstation client (`scripts/publish_artifact.py`), forced SSH receiver and
+The maintained client (`scripts/publish_artifact.py`), forced SSH receiver and
 on-origin pickup all use `host/release_contract.py` and `host/publish_remote.py`.
 The origin accepts only the fixed framed receive command. Uploaded data cannot
 choose a root, key, origin, package profile, legacy alias or administrative flag.
@@ -53,6 +76,13 @@ invitation to invent its key. Aliases must name the same configured channels.
 - `windows-x64`: exactly `windows-x86_64`, stable, with
   `latest-windows.json`. Windows-only policy needs only that actual profile, not
   fake beta keys or unavailable six-target packages.
+- `macos-arm64`: exactly `darwin-aarch64` for one of the four apps, stable, with
+  standard signed Tauri `latest.json`. Policy explicitly requires both app scopes
+  `[macos-arm64, windows-x64]`, and `macFeedUrl` preserves the currently compiled
+  Mac reader's exact origin/directory (including Papir's existing alias). Required
+  genuine Mac DMG + signed app tar use the existing package identity/seal proof.
+  Mac metadata filenames include `-macos-arm64` to avoid collisions with the
+  same-version Windows metadata; existing Windows/Launcher names stay unchanged.
 
 Each app's fixed bundle identifier, display name, executable, architecture and
 version must match policy. Checkmate's installed executable is
@@ -177,12 +207,23 @@ cannot be used as activation approval. Fresh host inventory, parent review and
 separate activation approval are still necessary. No initialization/deployment
 was performed by this source packet.
 
-## Workstation client and pickup
+## Maintained client/receiver internals (not PM release steps)
 
-The workstation validates the complete bundle, uses pinned SSH with explicit
+The CI coordinator uses `release_github.py` for exact repository/workflow/event/
+ref/source/run/attempt/request/job checks, bounded credential-safe Actions archive
+handoff and complete original hash inventories. It does not choose a latest
+successful build or execute downloaded product code. `prepare_bundle.py` shares
+`release_contract._expected_manifest` and its single deterministic receipt builder;
+only the existing native verifier authorizes cryptography. Exact signed bundles
+and receipts are retained **before** calling the existing writer. Interrupted
+public verification retries those immutable bytes through the existing journal.
+
+The client validates the complete bundle, uses pinned SSH with explicit
 `LAPKB_PUBLISH_KEY`, `LAPKB_PUBLISH_KNOWN_HOSTS`, `LAPKB_PUBLISH_USER`,
-`LAPKB_PUBLISH_HOST` and optional port, then verifies the exact fixed served feed
-and every immutable file over the configured HTTPS origin. Response coverage,
+`LAPKB_PUBLISH_HOST` and optional port, then verifies the exact fixed served feed,
+every immutable file, current catalog filename/target mappings and page installer
+links over the configured HTTPS origin. App Mac publication also verifies its
+configured existing reader feed/archive URL without proxies or redirects. Response coverage,
 feed, targets, distribution, version and inventory digest must match the locally
 validated release. Proxies, redirects, ambient SSH agents and credential fallback
 remain disabled. The wrapper accepts exactly
@@ -205,12 +246,13 @@ The override must be an absolute, owned, single-link private regular file with
 safe no-follow ancestors; the same signature checks still apply. The origin
 always uses its own fixed native verifier, never this workstation path.
 
-```text
-python3 scripts/publish_artifact.py --app <approved-app> --channel stable \
-  --bundle-dir <complete-reviewed-current-source-bundle>
-```
+The coordinator invokes the maintained client's valid `--app`, `--channel stable`
+and `--bundle-dir` interface automatically. There is no operator CLI step or second
+writer in the PM procedure. Legacy two-file staging/smoke workflows and BestDose's
+separate release-branch draft path have been removed after reference migration.
 
-Pickup requires protected private config/token/state. It tracks GitHub release/
+The retained host pickup implementation is not enabled by this workflow or setup
+and is not another PM release frontdoor. Pickup requires protected private config/token/state. It tracks GitHub release/
 asset IDs, sizes and digests plus fixed scope, refuses changed/disappeared tags,
 and marks a tag only after the same core succeeds and its result matches the
 exact downloaded inventory. GitHub bearer tokens go only to the fixed API asset
@@ -242,11 +284,13 @@ fixture runs only in that credential-free container with its explicit
 uses the maintained receiver/contract and locked verifier with synthetic trust,
 and removes its fixtures. It is not product signing or origin activation.
 
-These checks do not establish genuine release custody/signatures, publication,
-native Windows installation or application acceptance. The existing legacy
-`stage-release.yml`, `publish-download.yml` and `publish-smoke.yml` two-file
-interfaces remain **not release-approved** and must not be invoked. No duplicate
-writer or unsigned protected-app bypass was added. Full Deploy automation, Linux
-completion and scientific/oracle work remain deferred. The coordinated signed
-Launcher bootstrap uses this same client/core after genuine CI completion; it
-does not re-label or overwrite the first manual Windows release.
+The same isolated suite now includes coordinator GitHub response/archive fixtures,
+canonical signed-bundle parity, honest Mac/Windows feed publication, exact-record
+main transition, tampering/fresh-old-branch rejection, immutable partial retries
+and public catalog/page/client integration. The producer's existing native reader
+regressions run in its approved CI, not locally. These checks do not establish
+live release custody/publication, native installation or application acceptance.
+Protected configuration and genuinely newer source versions are still required
+for approved end-to-end automation evidence. No duplicate writer or unsigned app
+bypass was added. Linux qualification and scientific/oracle work remain deferred;
+monthly licences, SDK Permit, device/replay/clock checks are unchanged.

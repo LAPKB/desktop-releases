@@ -358,15 +358,17 @@ class LocalPublisherTests(unittest.TestCase):
             release = contract.validate_release(app, "stable", {name: self.bundle_dir / name for name in bundle},
                                                 self.policy, verifier=VERIFIER, scratch=self.bundle_dir)
             response = publish_remote._publication_result(release, "published")
+            catalog, page = publish_remote._outputs({"release": release}, {"historical": None, "history": [publish_remote._record_from_release(release)]})
+            served = {**bundle, "catalog.json": catalog, "index.html": page, "": page}
             seen = []
             def fetch(url, policy, maximum, expected=None):
                 name = url.rsplit("/", 1)[-1]
                 seen.append((url, maximum, expected))
-                self.assertIn(name, bundle)
-                return bundle[name] if expected is None else {"size": len(bundle[name]), "sha256": hashlib.sha256(bundle[name]).hexdigest()}
+                self.assertIn(name, served)
+                return served[name] if expected is None else {"size": len(served[name]), "sha256": hashlib.sha256(served[name]).hexdigest()}
             with mock.patch.object(publish_artifact, "_fetch_exact", side_effect=fetch):
                 publish_artifact._verify_served(self.policy, release, response)
-            self.assertEqual(len(seen), len(bundle))
+            self.assertEqual(len(seen), len(bundle) + 3)
             self.assertFalse(any(url.endswith("/latest.json") for url, _, _ in seen))
             feed_calls = [(maximum, expected) for url, maximum, expected in seen if url.endswith("/latest-windows.json")]
             self.assertEqual(feed_calls, [(contract.MAX_MANIFEST_BYTES, None)])

@@ -29,6 +29,7 @@ TARGETS = (
     "windows-x86_64", "linux-aarch64", "linux-x86_64",
 )
 COVERAGES = {"full-six": TARGETS, "windows-x64": ("windows-x86_64",),
+             "macos-arm64": ("darwin-aarch64",),
              "launcher-desktop": ("darwin-aarch64", "windows-x86_64")}
 WINDOWS_MINIMUMS = {"launcher": "0.1.9", "papir": "0.1.5", "bdautodial": "0.2.4", "bestdose": "1.0.11", "checkerboard": "0.8.2"}
 WINDOWS_PRODUCTS = {"launcher": "LAPKB Launcher", **{app: name for app, name in {
@@ -58,8 +59,8 @@ MAX_FILES = 64
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_BODY = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 _VERSION = re.compile("^" + _VERSION_BODY + "$")
-_ATTESTATION_NAME = re.compile(r"^build-attestation-" + _VERSION_BODY + r"\.json$")
-_RECEIPT_NAME = re.compile(r"^release-receipt-" + _VERSION_BODY + r"\.json$")
+_ATTESTATION_NAME = re.compile(r"^build-attestation-" + _VERSION_BODY + r"(?:-macos-arm64)?\.json$")
+_RECEIPT_NAME = re.compile(r"^release-receipt-" + _VERSION_BODY + r"(?:-macos-arm64)?\.json$")
 _KEY_ID = re.compile(r"^[0-9A-F]{16}$")
 _EXT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,63}$")
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -243,7 +244,7 @@ def validate_policy(value) -> Policy:
     for app in APP_IDS:
         entry = apps[app]
         required = {"sourceRepository", "branch", "bundleIdentifier", "executable", "channels"}
-        if type(entry) is not dict or not required <= set(entry) or set(entry) - (required | {"allowedCoverages", "retainedManualRecords"}):
+        if type(entry) is not dict or not required <= set(entry) or set(entry) - (required | {"allowedCoverages", "retainedManualRecords", "retainedSourceRecords"}):
             raise ContractError(f"{app} policy has an unexpected shape")
         coverages = entry.get("allowedCoverages", ["full-six"])
         if (type(coverages) is not list or not coverages
@@ -252,6 +253,14 @@ def validate_policy(value) -> Policy:
             raise ContractError(f"{app} receiver-approved coverage is invalid")
         if "launcher-desktop" in coverages and (app != "launcher" or coverages != ["launcher-desktop"]):
             raise ContractError("Launcher desktop coverage is only approved as the exact two-target Launcher scope")
+        if "macos-arm64" in coverages and (app == "launcher" or set(coverages) != {"macos-arm64", "windows-x64"}):
+            raise ContractError("app desktop publication requires both explicit Mac ARM64 and Windows x64 scopes")
+        retained_sources = entry.get("retainedSourceRecords", [])
+        if (type(retained_sources) is not list or len(retained_sources) > 1024
+                or any(type(h) is not str or not _HEX.fullmatch(h) for h in retained_sources)
+                or retained_sources != sorted(set(retained_sources))
+                or "retainedSourceRecords" in entry and not retained_sources):
+            raise ContractError("retained source records must be sorted exact whole durable-record hashes")
         retained = entry.get("retainedManualRecords", {})
         if (type(retained) is not dict or len(retained) > 2
                 or "retainedManualRecords" in entry and (not retained or app != "launcher" or "launcher-desktop" not in coverages)
@@ -276,14 +285,14 @@ def validate_policy(value) -> Policy:
         if (type(channels) is not dict or not channels or not set(channels) <= set(CHANNELS)
                 or set(channels) != set(aliases[app])):
             raise ContractError(f"{app} must explicitly configure matching known channels and aliases")
-        if "launcher-desktop" in coverages and set(channels) != {"stable"}:
+        if set(coverages) & {"launcher-desktop", "macos-arm64"} and set(channels) != {"stable"}:
             raise ContractError("Launcher desktop bootstrap is approved only for stable")
         normalized_channels = {}
         required_targets = {target for coverage in coverages for target in COVERAGES[coverage]}
         for channel, channel_policy in channels.items():
             required_channel = {"publicKey", "keyId", "profiles"}
             if (type(channel_policy) is not dict or not required_channel <= set(channel_policy)
-                    or set(channel_policy) - (required_channel | {"manualTargets"})):
+                    or set(channel_policy) - (required_channel | {"manualTargets", "macFeedUrl"})):
                 raise ContractError(f"{app}/{channel} policy has an unexpected shape")
             manual_targets = channel_policy.get("manualTargets", [])
             if (type(manual_targets) is not list or manual_targets not in ([], ["windows-x86_64"])
@@ -328,16 +337,31 @@ def validate_policy(value) -> Policy:
                             or profiles[0]["roles"] != expected_roles
                             or profiles[0]["required"] is not True):
                         raise ContractError("Windows x64 app release requires the signed NSIS installer/updater profile")
-                if "launcher-desktop" in coverages and target == "darwin-aarch64":
+                if set(coverages) & {"launcher-desktop", "macos-arm64"} and target == "darwin-aarch64":
                     updater = next(profile for profile in profiles if "updater" in profile["roles"])
                     if (len(profiles) > 3 or updater["extension"] != "app.tar.gz"
                             or updater["kind"] != "app-tar-gz" or updater["required"] is not True):
                         raise ContractError("Launcher Mac updater requires its genuine signed app.tar.gz profile")
                 normalized_profiles[target] = profiles
+            mac_feed = channel_policy.get("macFeedUrl")
+            if "macos-arm64" in coverages:
+                _nonempty(mac_feed, f"{app} existing Mac feed URL", 1024)
+                parsed = urlsplit(mac_feed)
+                _safe_origin(f"{parsed.scheme}://{parsed.netloc}")
+                canonical_path = f"/downloads/{app}/{channel}/latest.json"
+                alias_path = f"/{aliases[app][channel]}/latest.json" if aliases[app][channel] else None
+                if (parsed.username or parsed.password or parsed.query or parsed.fragment
+                        or parsed.path not in (canonical_path, alias_path)
+                        or parsed.path == canonical_path and f"{parsed.scheme}://{parsed.netloc}" != origin):
+                    raise ContractError("existing Mac feed must be the canonical feed or its configured legacy alias")
+            elif "macFeedUrl" in channel_policy:
+                raise ContractError("Mac feed URL is only configured for honest app Mac coverage")
             normalized_channels[channel] = {
                 "publicKey": public_key, "keyId": key_id, "profiles": normalized_profiles,
                 "manualTargets": manual_targets,
             }
+            if mac_feed is not None:
+                normalized_channels[channel]["macFeedUrl"] = mac_feed
         normalized_apps[app] = {
             "sourceRepository": source_repository, "branch": branch,
             "bundleIdentifier": entry["bundleIdentifier"],
@@ -346,30 +370,49 @@ def validate_policy(value) -> Policy:
         }
         if retained:
             normalized_apps[app]["retainedManualRecords"] = retained
+        if retained_sources:
+            normalized_apps[app]["retainedSourceRecords"] = retained_sources
     return Policy(root, origin, pickup_repository, minimum, aliases, normalized_apps)
 
 
 def retained_policy(policy, record):
-    """Accept only exact already-recorded manual history, never a fresh upload.
+    """Derive historical authority only from an explicitly pinned whole record.
 
-    The protected policy pins the complete canonical durable record. Restoring
-    its old null key/installer profile cannot bless any new receipt or bytes.
+    Fresh attestations, uploads and journal scope objects cannot match this shape.
+    A source pin restores only that record's retired branch, never a branch list,
+    uploaded key, changed bytes, package identity or general release authority.
+    The independent historical manual pin retains its existing narrow trust.
     """
-    if (type(record) is not dict or record.get("app") != "launcher"
-            or record.get("channel") != "stable" or record.get("coverage") != "windows-x64"
-            or record.get("distribution") != "manual-checksum"
-            or type(record.get("version")) is not str):
+    fields = {"app", "channel", "version", "versionTuple", "source", "inventory",
+              "inventoryDigest", "receipt", "receiptSha256", "buildAttestationSha256",
+              "manifestSha256", "coverage", "feed", "targets", "distribution"}
+    if type(record) is not dict or set(record) != fields or record.get("app") not in policy.apps:
         return policy
-    expected = policy.apps["launcher"].get("retainedManualRecords", {}).get(record.get("version"))
-    if expected is None or hashlib.sha256(canonical_json(record)).hexdigest() != expected:
+    app = record["app"]
+    entry = policy.apps[app]
+    digest = hashlib.sha256(canonical_json(record)).hexdigest()
+    manual_pin = (app == "launcher" and record.get("channel") == "stable"
+        and record.get("coverage") == "windows-x64" and record.get("distribution") == "manual-checksum"
+        and type(record.get("version")) is str
+        and entry.get("retainedManualRecords", {}).get(record["version"]) == digest)
+    source_pin = digest in entry.get("retainedSourceRecords", [])
+    if not manual_pin and not source_pin:
         return policy
-    apps = {**policy.apps}
-    apps["launcher"] = {**apps["launcher"], "allowedCoverages": ["windows-x64"],
-        "channels": {"stable": {"publicKey": None, "keyId": None,
-            "manualTargets": ["windows-x86_64"], "profiles": {"windows-x86_64": [{
-                "id": "nsis", "extension": "exe", "kind": "nsis", "required": True,
-                "roles": ["installer"]}]}}}}
-    return replace(policy, apps=apps)
+    restored = {**entry}
+    if source_pin:
+        source = _object(record["source"], ("repository", "branch", "commit", "tag"), "retained source")
+        if source["repository"] != entry["sourceRepository"]:
+            raise ContractError("retained source repository differs from configured application")
+        branch = _nonempty(source["branch"], "retained source branch", 128)
+        if any(ord(c) < 0x21 or c == "\\" for c in branch):
+            raise ContractError("retained source branch is invalid")
+        restored["branch"] = branch
+    if manual_pin:
+        restored.update(allowedCoverages=["windows-x64"], channels={"stable": {
+            "publicKey": None, "keyId": None, "manualTargets": ["windows-x86_64"],
+            "profiles": {"windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis",
+                "required": True, "roles": ["installer"]}]}}})
+    return replace(policy, apps={**policy.apps, app: restored})
 
 
 def _read_protected_file(path: Path, maximum: int, *, private=False):
@@ -601,6 +644,17 @@ def _validate_windows_payload(target_entry, app, version, executable):
         raise ContractError("Windows payload does not bind the real installed executable")
 
 
+def metadata_names(version, coverage):
+    """Mac app metadata shares a directory/version with its Windows metadata.
+
+    Keep every existing Windows/Launcher filename unchanged. Only the newly
+    qualified independent Mac app scope needs a non-colliding immutable leaf.
+    """
+    _version(version)
+    suffix = "-macos-arm64" if coverage == "macos-arm64" else ""
+    return (f"build-attestation-{version}{suffix}.json", f"release-receipt-{version}{suffix}.json")
+
+
 def feed_for_coverage(coverage):
     if type(coverage) is not str or coverage not in COVERAGES:
         raise ContractError("unsupported release coverage")
@@ -665,12 +719,52 @@ def _expected_manifest(policy, app, channel, version, attestation):
     for target in COVERAGES[coverage]:
         artifact = next(item for item in attestation["targets"][target]["artifacts"]
                         if ("installer" if manual else "updater") in item["roles"])
-        url = f"{policy.origin}/downloads/{app}/{channel}/{artifact['name']}"
+        if coverage == "macos-arm64":
+            # The existing Mac reader confines archives to its compiled feed's
+            # exact origin/directory (Papir uses the retained /papir alias).
+            parent = policy.apps[app]["channels"][channel]["macFeedUrl"].rsplit("/", 1)[0]
+            url = f"{parent}/{artifact['name']}"
+        else:
+            url = f"{policy.origin}/downloads/{app}/{channel}/{artifact['name']}"
         platforms[target] = ({"url": url, "sha256": artifact["sha256"],
                               "size": artifact["size"], "kind": artifact["kind"]}
                              if manual else {"url": url, "signature": artifact["updaterSignature"]})
     result["installers" if manual else "platforms"] = platforms
     return canonical_json(result)
+
+
+def _expected_receipt(policy, app, channel, version, attestation, manifest_bytes):
+    """The single deterministic receipt builder, shared by preparation/validation."""
+    coverage = attestation.get("coverage", "full-six")
+    manual = release_mode(policy, app, channel, coverage) == "manual-checksum"
+    receipt = {
+        "schema": "release-receipt-v1", "app": app, "channel": channel, "version": version,
+        "source": attestation["source"],
+        "buildAttestationSha256": hashlib.sha256(canonical_json(attestation)).hexdigest(),
+        "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "signatureKeyId": policy.apps[app]["channels"][channel]["keyId"], "targets": {},
+    }
+    if coverage != "full-six":
+        receipt.update(coverage=coverage, feed=feed_for_coverage(coverage))
+    if manual:
+        receipt["distribution"] = "manual-checksum"
+    for target, entry in attestation["targets"].items():
+        records = entry["artifacts"]
+        receipt["targets"][target] = {
+            "packageIdentity": entry["packageIdentity"],
+            "roles": {"installer": sorted(i["name"] for i in records if "installer" in i["roles"]),
+                      "updater": next((i["name"] for i in records if "updater" in i["roles"]), None)},
+            "artifacts": [{k: i[k] for k in ("name", "kind", "roles", "size", "sha256", "signatureKeyId")}
+                          for i in records],
+        }
+        if target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop"):
+            receipt["targets"][target].update(build=entry["build"], windowsPayload=entry["windowsPayload"])
+            if not manual:
+                receipt["targets"][target]["installerSignature"] = next(
+                    i["updaterSignature"] for i in records if "updater" in i["roles"])
+        elif coverage in ("launcher-desktop", "macos-arm64"):
+            receipt["targets"][target]["build"] = entry["build"]
+    return receipt
 
 
 def validate_release(app: str, channel: str, files: dict[str, Path], policy: Policy,
@@ -708,10 +802,9 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
     manual = release_mode(policy, app, channel, input_coverage) == "manual-checksum"
     attestation_name = attestation_files[0]
     receipt_name = receipt_files[0]
-    metadata_version = attestation_name[len("build-attestation-"):-len(".json")]
-    receipt_version = receipt_name[len("release-receipt-"):-len(".json")]
-    if metadata_version != receipt_version:
-        raise ContractError("attestation and receipt filenames name different versions")
+    metadata_version = attestation_name[len("build-attestation-"):-len(".json")].removesuffix("-macos-arm64")
+    if (attestation_name, receipt_name) != metadata_names(metadata_version, input_coverage):
+        raise ContractError("attestation/receipt filenames do not match the exact version and coverage")
     attestation_signature_name = attestation_name + ".sig"
     receipt_signature_name = receipt_name + ".sig"
     required_meta = {attestation_name, receipt_name, feed}
@@ -769,10 +862,10 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
         raise ContractError("fresh signed Launcher releases must start at bootstrap 0.1.11")
     if manual != (mode == "manual-checksum") or (manual and attestation.get("distribution") != mode):
         raise ContractError("release distribution does not match explicit receiver policy")
-    if (coverage == "windows-x64" and (channel != "stable"
+    if (coverage in ("windows-x64", "macos-arm64") and (channel != "stable"
             or version_tuple < _version(WINDOWS_MINIMUMS[app]))):
-        raise ContractError("Windows x64 channel/version is not qualified")
-    if coverage in ("windows-x64", "launcher-desktop"):
+        raise ContractError("Desktop app channel/version is not qualified")
+    if coverage in ("windows-x64", "launcher-desktop", "macos-arm64"):
         # Match the existing bounded Launcher reader, without changing any
         # consumed Mac protocol bytes or its historical acceptance policy.
         if (len(attestation["source"]["commit"]) != 40
@@ -792,7 +885,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
     for target in required_targets:
         windows_proof = target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop")
         target_keys = (("packageIdentity", "artifacts", "build", "windowsPayload") if windows_proof
-                       else ("packageIdentity", "artifacts", "build") if coverage == "launcher-desktop"
+                       else ("packageIdentity", "artifacts", "build") if coverage in ("launcher-desktop", "macos-arm64")
                        else ("packageIdentity", "artifacts"))
         target_entry = _object(targets[target], target_keys, f"{target} metadata")
         identity = _object(target_entry["packageIdentity"],
@@ -808,7 +901,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
             raise ContractError(f"{target} package identity, architecture, or version is not approved")
         if windows_proof:
             _validate_windows_payload(target_entry, app, version, app_policy["executable"])
-        elif coverage == "launcher-desktop":
+        elif coverage in ("launcher-desktop", "macos-arm64"):
             _validate_build(target_entry["build"])
         records = target_entry["artifacts"]
         if type(records) is not list or not records or len(records) > 8:
@@ -821,7 +914,6 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
         if record_names != sorted(record_names):
             raise ContractError(f"{target} package inventory must be sorted by name")
         profiles = channel_policy["profiles"][target]
-        profile_by_extension = {profile["extension"].lower(): profile for profile in profiles}
         used_profiles = set()
         normal_artifacts = []
         installer_count = 0
@@ -838,7 +930,6 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
             final_component = name.rsplit(".", 1)
             if len(final_component) != 2:
                 raise ContractError(f"{target} package extension is not configured")
-            extension = final_component[1]
             # Multi-part extensions are matched from the configured suffix, not guessed.
             profile = next((entry for entry in profiles
                             if name.endswith("." + entry["extension"])), None)
@@ -854,7 +945,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
                 raise ContractError(f"{target} package roles are malformed")
             size = item["size"]
             if (type(size) is not int or size < 1 or size > MAX_FILE_BYTES
-                    or (coverage == "windows-x64" and size > 256 * 1024 * 1024)
+                    or (coverage in ("windows-x64", "macos-arm64") and size > 256 * 1024 * 1024)
                     or (coverage == "launcher-desktop" and size > 128 * 1024 * 1024)):
                 raise ContractError(f"{target} package size is out of range")
             if type(item["sha256"]) is not str or not _HEX.fullmatch(item["sha256"]):
@@ -875,7 +966,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
                 updater_count += 1
                 if item["signatureKeyId"] != key_id or type(item["updaterSignature"]) is not str:
                     raise ContractError("updater signature key does not match configured trust")
-                if coverage in ("windows-x64", "launcher-desktop") and len(item["updaterSignature"]) > 16 * 1024:
+                if coverage in ("windows-x64", "launcher-desktop", "macos-arm64") and len(item["updaterSignature"]) > 16 * 1024:
                     raise ContractError("Windows installer signature exceeds the Launcher reader bound")
                 try:
                     signature_bytes = base64.b64decode(item["updaterSignature"], validate=True)
@@ -905,7 +996,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
         }
         if windows_proof:
             normalized_targets[target].update(build=target_entry["build"], windowsPayload=target_entry["windowsPayload"])
-        elif coverage == "launcher-desktop":
+        elif coverage in ("launcher-desktop", "macos-arm64"):
             normalized_targets[target]["build"] = target_entry["build"]
 
     if set(files) != inventory:
@@ -916,55 +1007,15 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
     )
     manifest_bytes = _read_regular(files[feed], MAX_MANIFEST_BYTES, "Tauri manifest")
     manifest = strict_json(manifest_bytes, MAX_MANIFEST_BYTES, "Tauri manifest")
-    if coverage == "launcher-desktop" and len(manifest_bytes) > 64 * 1024:
+    if coverage in ("launcher-desktop", "macos-arm64") and len(manifest_bytes) > 64 * 1024:
         raise ContractError("Launcher updater feed exceeds its bounded native reader")
     if canonical_json(manifest) != manifest_bytes or manifest_bytes != expected_latest:
         raise ContractError("release feed is not the exact canonical manifest derived from the release")
 
-    receipt = {
-        "schema": "release-receipt-v1",
-        "app": app,
-        "channel": channel,
-        "version": version,
-        "source": attestation["source"],
-        "buildAttestationSha256": hashlib.sha256(attestation_bytes).hexdigest(),
-        "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
-        "signatureKeyId": key_id,
-        "targets": {},
-    }
-    if coverage in ("windows-x64", "launcher-desktop"):
-        receipt.update(coverage=coverage, feed=feed)
-    if manual:
-        receipt["distribution"] = "manual-checksum"
-    for target in required_targets:
-        records = normalized_targets[target]["artifacts"]
-        receipt["targets"][target] = {
-            "packageIdentity": normalized_targets[target]["packageIdentity"],
-            "roles": {
-                "installer": sorted(item["name"] for item in records if "installer" in item["roles"]),
-                "updater": next((item["name"] for item in records if "updater" in item["roles"]), None),
-            },
-            "artifacts": [
-                {"name": item["name"], "kind": item["kind"], "roles": item["roles"],
-                 "size": item["size"], "sha256": item["sha256"],
-                 "signatureKeyId": item["signatureKeyId"]}
-                for item in records
-            ],
-        }
-        if target == "windows-x86_64" and coverage in ("windows-x64", "launcher-desktop"):
-            # Same existing signed receipt/key and final installer signature,
-            # not a caller-supplied executable hash or a new signing protocol.
-            receipt["targets"][target].update(
-                build=normalized_targets[target]["build"],
-                windowsPayload=normalized_targets[target]["windowsPayload"],
-            )
-            if not manual:
-                receipt["targets"][target]["installerSignature"] = next(
-                    item["updaterSignature"] for item in records if "updater" in item["roles"])
-        elif coverage == "launcher-desktop":
-            receipt["targets"][target]["build"] = normalized_targets[target]["build"]
+    receipt = _expected_receipt(policy, app, channel, version,
+                                {**attestation, "targets": normalized_targets}, manifest_bytes)
     expected_receipt = canonical_json(receipt)
-    if coverage in ("windows-x64", "launcher-desktop") and len(expected_receipt) > 1024 * 1024:
+    if coverage in ("windows-x64", "launcher-desktop", "macos-arm64") and len(expected_receipt) > 1024 * 1024:
         raise ContractError("Windows receipt exceeds the Launcher reader bound")
     actual_receipt = _read_regular(files[receipt_name], MAX_RECEIPT_BYTES,
                                    "release receipt")
@@ -974,7 +1025,7 @@ def validate_release(app: str, channel: str, files: dict[str, Path], policy: Pol
     if not manual:
         receipt_sig_data = _read_regular(files[receipt_signature_name], MAX_SIGNATURE_BYTES,
                                         "release receipt signature")
-        if coverage in ("windows-x64", "launcher-desktop") and len(base64.b64encode(receipt_sig_data)) > 16 * 1024:
+        if coverage in ("windows-x64", "launcher-desktop", "macos-arm64") and len(base64.b64encode(receipt_sig_data)) > 16 * 1024:
             raise ContractError("Windows receipt signature exceeds the Launcher reader bound")
         receipt_sig = _signature_text(receipt_sig_data, "release receipt signature")
         verify_minisign(files[receipt_name], receipt_sig, public_key, verifier, scratch)

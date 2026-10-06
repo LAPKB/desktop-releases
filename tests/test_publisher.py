@@ -65,7 +65,13 @@ class PublisherCoreTests(unittest.TestCase):
 
     def test_unconfigured_publisher_example_fails_closed_without_keys(self):
         example = json.loads((HOST / "publisher-trust.example.json").read_bytes())
-        self.assertEqual(example["apps"], {})
+        self.assertEqual(set(example["apps"]), set(contract.APP_IDS))
+        for app, entry in example["apps"].items():
+            self.assertIsNone(entry["branch"])
+            self.assertIsNone(entry["channels"]["stable"]["publicKey"])
+            self.assertIsNone(entry["channels"]["stable"]["keyId"])
+            self.assertNotIn("retainedSourceRecords", entry)
+            self.assertEqual(entry["allowedCoverages"], ["launcher-desktop"] if app == "launcher" else ["macos-arm64", "windows-x64"])
         with self.assertRaises(contract.ContractError):
             contract.validate_policy(example)
 

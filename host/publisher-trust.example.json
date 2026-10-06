@@ -2,14 +2,88 @@
   "schema": "lapkb-publisher-trust-v1",
   "root": null,
   "origin": null,
-  "pickupRepository": null,
+  "pickupRepository": "LAPKB/desktop-releases",
   "checkmateMinimumVersion": null,
   "legacyAliases": {
-    "launcher": {"stable": null, "beta": null},
-    "papir": {"stable": null, "beta": null},
-    "bestdose": {"stable": null, "beta": null},
-    "bdautodial": {"stable": null, "beta": null},
-    "checkerboard": {"stable": null, "beta": null}
+    "launcher": {"stable": null},
+    "papir": {"stable": "papir"},
+    "bestdose": {"stable": null},
+    "bdautodial": {"stable": null},
+    "checkerboard": {"stable": null}
   },
-  "apps": {}
+  "apps": {
+    "launcher": {
+      "sourceRepository": "LAPKB/Launcher", "branch": null,
+      "bundleIdentifier": "org.lapkb.launcher", "executable": "lapkb-launcher",
+      "allowedCoverages": ["launcher-desktop"],
+      "channels": {"stable": {"publicKey": null, "keyId": null, "profiles": {
+        "darwin-aarch64": [
+          {"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": true},
+          {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": true},
+          {"id": "zip", "extension": "app.zip", "kind": "app-zip", "roles": ["installer"], "required": true}
+        ],
+        "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": true}]
+      }}}
+    },
+    "papir": {
+      "sourceRepository": "LAPKB/Pmetrics-Papir", "branch": null,
+      "bundleIdentifier": "com.papir.app", "executable": "papir-v3",
+      "allowedCoverages": ["macos-arm64", "windows-x64"],
+      "channels": {"stable": {"publicKey": null, "keyId": null,
+        "macFeedUrl": "https://licenses-staging.lapkb.org/papir/latest.json",
+        "profiles": {
+          "darwin-aarch64": [
+            {"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": true},
+            {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": true}
+          ],
+          "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": true}]
+        }
+      }}
+    },
+    "bestdose": {
+      "sourceRepository": "LAPKB/BestDose", "branch": null,
+      "bundleIdentifier": "org.lapkb.bestdose", "executable": "bestdose",
+      "allowedCoverages": ["macos-arm64", "windows-x64"],
+      "channels": {"stable": {"publicKey": null, "keyId": null,
+        "macFeedUrl": "https://hermes.lapkb.org/downloads/bestdose/stable/latest.json",
+        "profiles": {
+          "darwin-aarch64": [
+            {"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": true},
+            {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": true}
+          ],
+          "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": true}]
+        }
+      }}
+    },
+    "bdautodial": {
+      "sourceRepository": "LAPKB/BDautodial", "branch": null,
+      "bundleIdentifier": "com.bdautodial.desktop", "executable": "bdautodial",
+      "allowedCoverages": ["macos-arm64", "windows-x64"],
+      "channels": {"stable": {"publicKey": null, "keyId": null,
+        "macFeedUrl": "https://hermes.lapkb.org/downloads/bdautodial/stable/latest.json",
+        "profiles": {
+          "darwin-aarch64": [
+            {"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": true},
+            {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": true}
+          ],
+          "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": true}]
+        }
+      }}
+    },
+    "checkerboard": {
+      "sourceRepository": "LAPKB/Checkerboard", "branch": null,
+      "bundleIdentifier": "org.lapkb.checkmate", "executable": "checkmate-desktop",
+      "allowedCoverages": ["macos-arm64", "windows-x64"],
+      "channels": {"stable": {"publicKey": null, "keyId": null,
+        "macFeedUrl": "https://hermes.lapkb.org/downloads/checkerboard/stable/latest.json",
+        "profiles": {
+          "darwin-aarch64": [
+            {"id": "app-tar", "extension": "app.tar.gz", "kind": "app-tar-gz", "roles": ["updater"], "required": true},
+            {"id": "dmg", "extension": "dmg", "kind": "dmg", "roles": ["installer"], "required": true}
+          ],
+          "windows-x86_64": [{"id": "nsis", "extension": "exe", "kind": "nsis", "roles": ["installer", "updater"], "required": true}]
+        }
+      }}
+    }
+  }
 }

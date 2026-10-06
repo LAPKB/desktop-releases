@@ -15,6 +15,10 @@ python3 -m py_compile \
   host/publish_remote.py \
   host/lapkb-pickup.py \
   scripts/publish_artifact.py \
+  scripts/release_github.py \
+  scripts/release_desktop.py \
+  scripts/prepare_bundle.py \
+  tests/test_release_automation.py \
   tests/support.py \
   tests/test_publisher.py \
   tests/test_pickup.py \
